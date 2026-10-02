@@ -1,0 +1,58 @@
+2026-10-02 15:30:40 | INFO     | tracker            | Seeded 9 sponsor(s) from config
+2026-10-02 15:34:35 | INFO     | discovery          | Scanning topic:genesys
+2026-10-02 15:34:39 | INFO     | discovery          | topic:genesys page 1 -> 79 repos (+79 total seen, 79 indexed)
+2026-10-02 15:34:39 | INFO     | discovery          | Scanning topic:genesys-cloud
+2026-10-02 15:34:41 | INFO     | discovery          | topic:genesys-cloud page 1 -> 33 repos (+33 total seen, 33 indexed)
+2026-10-02 15:34:41 | INFO     | discovery          | Aggregated 112 repos across 57 owners
+2026-10-02 15:35:59 | INFO     | discovery          | Owner lookup budget (40) reached
+2026-10-02 15:35:59 | INFO     | discovery          | 17 owner(s) not profiled (lookup budget 40); their org filter is evaluated against topic-tagged repos only
+2026-10-02 15:35:59 | INFO     | discovery          | Discovery complete: 18/57 owners passed the filter (org>=5 repos, individual>=3 genesys repos)
+2026-10-02 15:36:40 | INFO     | tracker            | Added sponsor GenesysPureEngage (email/new)
+2026-10-02 15:38:47 | INFO     | discovery          | Scanning topic:genesys
+2026-10-02 15:38:50 | INFO     | discovery          | topic:genesys page 1 -> 79 repos (+79 total seen, 79 indexed)
+2026-10-02 15:38:50 | INFO     | discovery          | Aggregated 79 repos across 49 owners
+2026-10-02 15:40:35 | INFO     | tracker            | Sponsor GenesysPureEngage already tracked (no changes)
+2026-10-02 15:40:35 | INFO     | tracker            | Added sponsor api-evangelist (email/new)
+2026-10-02 15:42:28 | INFO     | email-sender       | [DRY RUN] email -> GenesysPureEngage <devfoundry@genesys.com> | This plugin facilitates real-time co-browsing between custom for Genesys Cloud teams | 1228 chars
+2026-10-02 15:42:28 | INFO     | scheduler          | Tick end | attempted=1 sent=1 failed=0 skipped=0 usage={'email': {'used': 1, 'limit': 15, 'remaining': 14}, 'forum': {'used': 0, 'limit': 3, 'remaining': 3}}
+2026-10-02 16:04:37 | INFO     | webapp             | GitHub connected as bhkbdbhatt
+2026-10-02 16:05:03 | INFO     | discovery          | Scanning topic:genesys
+2026-10-02 16:05:06 | INFO     | discovery          | topic:genesys page 1 -> 79 repos (+79 total seen, 79 indexed)
+2026-10-02 16:05:06 | INFO     | discovery          | Aggregated 79 repos across 49 owners
+2026-10-02 16:06:10 | INFO     | discovery          | Owner lookup budget (40) reached
+2026-10-02 16:06:10 | INFO     | discovery          | 9 owner(s) not profiled (lookup budget 40); their org filter is evaluated against topic-tagged repos only
+2026-10-02 16:06:10 | INFO     | discovery          | Discovery complete: 15/49 owners passed the filter (org>=5 repos, individual>=3 genesys repos)
+2026-10-02 16:06:57 | INFO     | tracker            | Enriched existing sponsor inprod
+2026-10-02 16:06:57 | INFO     | tracker            | Enriched existing sponsor Noralogix
+2026-10-02 16:06:57 | INFO     | tracker            | Sponsor GenesysPureEngage already tracked (no changes)
+2026-10-02 16:06:57 | INFO     | tracker            | Added sponsor gildas (email/new)
+2026-10-02 16:06:57 | INFO     | tracker            | Added sponsor ux-nl (email/new)
+2026-10-02 16:06:57 | INFO     | tracker            | Sponsor api-evangelist already tracked (no changes)
+2026-10-02 16:06:57 | INFO     | tracker            | Added sponsor CIAT-DAPA (email/new)
+2026-10-02 16:06:57 | INFO     | tracker            | Added sponsor directivegames (email/new)
+2026-10-02 16:06:57 | INFO     | tracker            | Added sponsor LazarusID (email/new)
+2026-10-02 16:07:55 | INFO     | email-sender       | [DRY RUN] email -> inprod <hello@inprod.io> | This plugin facilitates real-time co-browsing between custom for Genesys Cloud teams | 1202 chars
+2026-10-02 16:07:55 | INFO     | email-sender       | [DRY RUN] email -> Noralogix <contactus@noralogix.com> | This plugin facilitates real-time co-browsing between custom for Genesys Cloud teams | 1215 chars
+2026-10-02 16:07:55 | INFO     | email-sender       | [DRY RUN] email -> gildas <gildas@breizh.org> | This plugin facilitates real-time co-browsing between custom for Genesys Cloud teams | 1198 chars
+2026-10-02 16:07:55 | INFO     | email-sender       | [DRY RUN] email -> ux-nl <info@ux.nl> | This plugin facilitates real-time co-browsing between custom for Genesys Cloud teams | 1196 chars
+2026-10-02 16:07:55 | WARNING  | scheduler          | Not deliverable to MakingChatbots: no valid email on file for 'MakingChatbots'
+2026-10-02 16:07:55 | INFO     | forum-sender       | [DRY RUN] forum post -> MyPureCloud | Open-source plugin for Genesys Cloud: This plugin facilitates real-time co-browsing between custom
+2026-10-02 16:07:55 | WARNING  | scheduler          | Not deliverable to ovotech: no valid email on file for 'ovotech'
+2026-10-02 16:07:55 | INFO     | forum-sender       | [DRY RUN] forum post -> purecloudlabs | Open-source plugin for Genesys Cloud: This plugin facilitates real-time co-browsing between custom
+2026-10-02 16:07:55 | WARNING  | scheduler          | Not deliverable to splunk: no valid email on file for 'splunk'
+2026-10-02 16:07:55 | INFO     | email-sender       | [DRY RUN] email -> api-evangelist <info@apievangelist.com> | This plugin facilitates real-time co-browsing between custom for Genesys Cloud teams | 1201 chars
+2026-10-02 16:07:55 | INFO     | email-sender       | [DRY RUN] email -> CIAT-DAPA <j.r.villegas@cgiar.org> | This plugin facilitates real-time co-browsing between custom for Genesys Cloud teams | 1210 chars
+2026-10-02 16:07:55 | INFO     | email-sender       | [DRY RUN] email -> directivegames <info@directivegames.com> | This plugin facilitates real-time co-browsing between custom for Genesys Cloud teams | 1198 chars
+2026-10-02 16:07:55 | INFO     | email-sender       | [DRY RUN] email -> LazarusID <clay@lazarusid.com> | This plugin facilitates real-time co-browsing between custom for Genesys Cloud teams | 1198 chars
+2026-10-02 16:07:55 | INFO     | scheduler          | Tick end | attempted=10 sent=10 failed=0 skipped=3 usage={'email': {'used': 9, 'limit': 15, 'remaining': 6}, 'forum': {'used': 2, 'limit': 3, 'remaining': 1}}
+2026-10-02 16:08:34 | WARNING  | scheduler          | Not deliverable to GenesysCloudBlueprints: no valid email on file for 'GenesysCloudBlueprints'
+2026-10-02 16:08:34 | WARNING  | scheduler          | Not deliverable to GenesysCloudDevOps: no valid email on file for 'GenesysCloudDevOps'
+2026-10-02 16:08:34 | WARNING  | scheduler          | Not deliverable to MakingChatbots: no valid email on file for 'MakingChatbots'
+2026-10-02 16:08:34 | WARNING  | scheduler          | Not deliverable to ovotech: no valid email on file for 'ovotech'
+2026-10-02 16:08:34 | WARNING  | scheduler          | Not deliverable to splunk: no valid email on file for 'splunk'
+2026-10-02 16:08:34 | INFO     | scheduler          | Tick end | attempted=0 sent=0 failed=0 skipped=5 usage={'email': {'used': 9, 'limit': 15, 'remaining': 6}, 'forum': {'used': 2, 'limit': 3, 'remaining': 1}}
+2026-10-02 17:44:13 | WARNING  | auth               | OUTREACH_AUTH_SECRET is not set; generated a local key in D:\plugin-genesys\bot-for-genesys-funding\users.json. Set OUTREACH_AUTH_SECRET to keep credentials valid across machines and to keep TOTP secrets out of the file in the clear.
+2026-10-02 17:45:23 | INFO     | auth               | Created UI account for bhk.bdbhatt@gmail.com
+2026-10-02 17:45:23 | INFO     | webapp             | Signed in bhk.bdbhatt@gmail.com
+2026-10-02 17:47:10 | INFO     | webapp             | Enrolled two-factor for bhk.bdbhatt@gmail.com
+2026-10-02 17:48:08 | INFO     | webapp             | Signed in bhk.bdbhatt@gmail.com

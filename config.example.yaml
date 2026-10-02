@@ -1,0 +1,228 @@
+# =============================================================================
+# GenesysPluginSponsorBot configuration
+#
+# Copy this file to `config.yaml` (git-ignored) and edit to taste:
+#     cp config.example.yaml config.yaml      # POSIX
+#     Copy-Item config.example.yaml config.yaml   # PowerShell
+#
+# Secrets are NEVER stored here. Reference environment variables instead, e.g.
+#     GITHUB_TOKEN, SMTP_PASSWORD, FORUM_API_KEY
+# =============================================================================
+
+plugin:
+  # The open-source plugin being promoted.
+  name: "Genesys Cloud Community Plugin"
+  description: >-
+    Open-source plugin for Genesys Cloud that reduces the custom-development
+    cost of common integration patterns. MIT licensed, actively maintained by
+    contributors who build on Genesys Cloud every day.
+  repo_url: "https://github.com/purecloudlabs/community-plugin-example"
+  appfoundry_url: "https://appfoundry.genesys.cloud/"
+  demo_url: ""
+  maintainer_name: "Your Name"
+  maintainer_email: "you@example.com"
+
+  # One line, problem-first statement used as the opening sentence.
+  value_prop: >-
+    Stop rebuilding the same Genesys Cloud integration in every project - this
+    plugin ships the pattern as a tested, reusable building block.
+  # Concrete capabilities, listed in outreach as short bullets.
+  features:
+    - "Drop-in Genesys Cloud API wrapper with retry and token handling"
+    - "Event-driven architecture (Pub/Sub) with no server to operate"
+    - "Example flows for messaging, notifications and call control"
+    - "MIT licensed, no vendor lock-in, community supported"
+
+  # Call to action appended to every message. Keep it low friction.
+  cta: >-
+    Would a 15-minute walkthrough be useful? Happy to share the repo, the
+    architecture notes and the roadmap.
+  # Optional: a concrete sponsorship ask, used by the forum composer.
+  ask: >-
+    We are looking for organisations willing to sponsor ongoing maintenance of
+    this plugin. Sponsorship covers CI, docs and the contributor rotation.
+  # Compliance line appended to every email.
+  unsubscribe_note: >-
+    If this is not relevant to you, reply "unsubscribe" and you will not hear
+    from this bot again.
+
+# -----------------------------------------------------------------------------
+# Channel: email (SMTP)
+# -----------------------------------------------------------------------------
+email:
+  enabled: true
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  use_tls: true          # STARTTLS on smtp_port (587)
+  use_ssl: false         # implicit TLS (465) - mutually exclusive with use_tls
+  username: "bot@example.com"
+  sender: "Genesys Plugin Bot <bot@example.com>"
+  password_env: "SMTP_PASSWORD"
+  timeout_seconds: 30
+  # Used when a generated message has no "Subject:" line.
+  subject_template: "{feature} for Genesys Cloud teams"
+  # Optional HTML wrapper. Placeholders: {{BODY}}, {{PREHEADER}}, {{FOOTER}}
+  # Leave empty to auto-render the plain-text body as simple HTML.
+  html_template: ""
+
+# -----------------------------------------------------------------------------
+# Channel: forum (Genesys Community / AppFoundry discussion board)
+# -----------------------------------------------------------------------------
+forum:
+  enabled: true
+  name: "Genesys Cloud Community - AppFoundry"
+  # Where the post should be created. Printed in manual fallback mode.
+  topic_url: "https://community.genesys.cloud/discussion/appfoundry"
+  # Optional REST endpoint that accepts {"topic_url","title","body"}.
+  # Leave empty and the sender prints the post for manual publishing.
+  api_url: ""
+  api_key_env: "FORUM_API_KEY"
+  auth_header: "Authorization"
+  auth_scheme: "Bearer"
+  timeout_seconds: 30
+  title_template: "Open-source plugin: {feature}"
+  # In manual mode the formatted post is also written here for copy/paste.
+  outbox_dir: "forum_outbox"
+
+# -----------------------------------------------------------------------------
+# GitHub discovery
+# -----------------------------------------------------------------------------
+github:
+  api_base: "https://api.github.com"
+  token_env: "GITHUB_TOKEN"       # PAT, only needed for rate limits
+  user_agent: "GenesysPluginSponsorBot/1.0 (+https://github.com/)"
+  topics:
+    - "genesys"
+    - "genesys-cloud"
+  per_page: 100
+  max_pages: 3                    # 300 repos max per topic
+  request_delay_seconds: 0.4      # polite pacing between API calls
+  timeout_seconds: 20
+  # Filter: orgs need >= min_org_repos public repos, individuals need
+  # >= min_individual_genesys_repos topic-tagged repos.
+  filters:
+    min_org_repos: 5
+    min_individual_genesys_repos: 3
+    min_stars: 0
+    exclude_forks: true
+    # Owner profile lookups are rate limited; only inspect the top N.
+    max_owner_lookups: 40
+  # Fetch owner websites to hunt for a public contact address.
+  scrape_public_emails: true
+  email_scrape_max_sites: 3
+
+# -----------------------------------------------------------------------------
+# Pre-seeded pipeline. `discover` enriches these with public contact details;
+# `tracker` seeds itself from this list on first run.
+# -----------------------------------------------------------------------------
+sponsors:
+  - name: "GenesysCloudDevOps"
+    email: ""
+    channel: "email"
+    status: "new"
+    github: "GenesysCloudDevOps"
+    contact: ""
+    website: ""
+    company: "Genesys Cloud DevOps"
+    notes: "92 repos - Terraform / CX-as-Code. Heavy Genesys Cloud DevOps user base."
+  - name: "GenesysCloudBlueprints"
+    email: ""
+    channel: "email"
+    status: "new"
+    github: "GenesysCloudBlueprints"
+    website: ""
+    company: "Genesys"
+    notes: "108 repos - official blueprints. Potential showcase/co-marketing partner."
+  - name: "inprod"
+    email: ""
+    channel: "email"
+    status: "new"
+    github: "inprod"
+    website: ""
+    company: "Inprod"
+    notes: "Puppet/Ansible modules for Genesys. Active DevOps community, module owners."
+  - name: "Noralogix"
+    email: ""
+    channel: "email"
+    status: "new"
+    github: "Noralogix"
+    website: ""
+    company: "Noralogix"
+    notes: "Notifications, Power BI, EventGrid integrations - ships Genesys tooling."
+  - name: "splunk"
+    email: ""
+    channel: "email"
+    status: "new"
+    github: "splunk"
+    website: ""
+    company: "Splunk"
+    notes: "Official Splunk add-on for Genesys Cloud. Integration partner."
+  - name: "MakingChatbots"
+    email: ""
+    channel: "email"
+    status: "new"
+    github: "MakingChatbots"
+    website: ""
+    company: "Making Chatbots"
+    notes: "genesys-cloud-plugins + MCP server + n8n nodes. Very active builder."
+  - name: "ovotech"
+    email: ""
+    channel: "email"
+    status: "new"
+    github: "ovotech"
+    website: ""
+    company: "Ovo"
+    notes: "Web messaging tester + CLI tools. Direct competitor-adjacent tooling."
+  - name: "purecloudlabs"
+    email: ""
+    channel: "forum"
+    status: "new"
+    github: "purecloudlabs"
+    contact: "https://community.genesys.cloud/discussion/appfoundry"
+    website: "https://developer.purecloud.com"
+    company: "Genesys Cloud Labs"
+    notes: "74 repos, community plugins. Forum post is the right channel here."
+  - name: "MyPureCloud"
+    email: ""
+    channel: "forum"
+    status: "new"
+    github: "MyPureCloud"
+    contact: "https://community.genesys.cloud/discussion/appfoundry"
+    website: "https://help.mypurecloud.com"
+    company: "Genesys"
+    notes: "Official org, 101 repos, SDK maintainers. Partner-level conversation."
+
+# -----------------------------------------------------------------------------
+# Rate limits (per local calendar day, persisted in the tracker)
+# -----------------------------------------------------------------------------
+rate_limits:
+  max_emails_per_day: 15
+  max_forum_posts_per_day: 3
+  # Extra safety: never send two messages to the same sponsor within N hours.
+  min_hours_between_attempts: 72
+  # Stop the scheduler after this many consecutive send failures.
+  max_consecutive_failures: 5
+
+# -----------------------------------------------------------------------------
+# Scheduler
+# -----------------------------------------------------------------------------
+scheduler:
+  interval_seconds: 7200     # cron-like: every 2 hours
+  batch_size: 5              # sponsors per tick
+  dry_run: false             # true = generate + log, never transmit
+  # Optional: hand the rendered prompt to a local CLI tool instead of using the
+  # built-in composer. The command receives the prompt on stdin and must print
+  # the final message on stdout. Example: ["ollama", "run", "llama3.1"]
+  llm_command: []
+  llm_timeout_seconds: 120
+
+# -----------------------------------------------------------------------------
+# Paths / logging
+# -----------------------------------------------------------------------------
+paths:
+  tracker_file: "sponsors.json"
+  discovery_cache: "discovered.json"
+  log_file: "bot.log"
+  log_level: "INFO"
+  log_max_bytes: 2097152
+  log_backup_count: 3

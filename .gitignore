@@ -1,0 +1,33 @@
+# Secrets and local state - never commit these.
+config.yaml
+.env
+*.env
+!.env.example
+
+# Runtime output
+bot.log
+bot.log.*
+sponsors.json
+sponsors.json.corrupt
+discovered.json
+forum_outbox/
+users.json
+users.json.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

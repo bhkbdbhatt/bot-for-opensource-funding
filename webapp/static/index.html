@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="web-token" content="__WEB_TOKEN__">
+  <title>Outreach Wizard</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="layout hidden" id="app-root">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">OW</span>
+        <div>
+          <div class="brand-name">Outreach Wizard</div>
+          <div class="brand-sub" id="brand-profile">No profile</div>
+        </div>
+      </div>
+      <div class="profile-bar">
+        <select id="profile-select" aria-label="Active campaign"></select>
+      </div>
+      <nav class="steps" id="steps" aria-label="Wizard steps"></nav>
+      <div class="sidebar-foot">
+        <button class="link-btn" data-action="new-profile">+ New campaign</button>
+        <button class="link-btn" data-action="open-security">Security &amp; 2FA</button>
+        <div class="who">
+          <div class="who-email" id="who-email">&mdash;</div>
+          <button class="link-btn" data-action="logout">Sign out</button>
+        </div>
+        <div class="version" id="version"></div>
+      </div>
+    </aside>
+    <main class="main" id="main" aria-live="polite"></main>
+  </div>
+
+  <div class="auth-shell hidden" id="auth-root" aria-live="polite"></div>
+
+  <div class="toasts" id="toasts"></div>
+  <div class="modal-backdrop hidden" id="modal-root"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
