@@ -56,3 +56,14 @@
 2026-10-02 17:45:23 | INFO     | webapp             | Signed in bhk.bdbhatt@gmail.com
 2026-10-02 17:47:10 | INFO     | webapp             | Enrolled two-factor for bhk.bdbhatt@gmail.com
 2026-10-02 17:48:08 | INFO     | webapp             | Signed in bhk.bdbhatt@gmail.com
+2026-10-05 07:50:50 | WARNING  | auth               | OUTREACH_AUTH_SECRET is not set. Falling back to the key stored inside D:\plugin-genesys\bot-for-genesys-funding\users.json, which protects the file no better than the filesystem already does. Set it to a long random string to survive moving or backing up the file.
+2026-10-05 07:51:56 | INFO     | webapp             | Signed in bhk.bdbhatt@gmail.com
+2026-10-05 07:51:56 | INFO     | state              | Rate counters reset for 2026-10-05
+2026-10-05 07:51:56 | INFO     | state              | Rate counters reset for 2026-10-05
+2026-10-05 07:53:34 | INFO     | content-store      | Added content item genesys-cloud-community-plugin (draft)
+2026-10-05 07:53:34 | WARNING  | content-engine     | Content gate rejected a draft for coderlegion: no author disclosure - say plainly that you maintain the project
+2026-10-05 07:53:34 | WARNING  | content-engine     | Content gate rejected a draft for coderlegion: no author disclosure - say plainly that you maintain the project
+2026-10-05 07:53:47 | WARNING  | content-engine     | Content gate rejected a draft for coderlegion: no author disclosure - say plainly that you maintain the project
+2026-10-05 07:54:05 | WARNING  | content-engine     | Content gate rejected a draft for coderlegion: no author disclosure - say plainly that you maintain the project
+2026-10-05 07:54:05 | WARNING  | content-engine     | Content gate rejected a draft for coderlegion: no author disclosure - say plainly that you maintain the project
+2026-10-05 07:54:05 | WARNING  | content-engine     | Content gate rejected a draft for coderlegion: no author disclosure - say plainly that you maintain the project
