@@ -53,6 +53,7 @@ def _paths_block() -> Dict[str, Any]:
     return {
         "tracker_file": "sponsors.json",
         "discovery_cache": "discovered.json",
+        "content_file": "content.json",
         "log_file": "bot.log",
         "log_level": "INFO",
         "log_max_bytes": 2 * 1024 * 1024,
@@ -66,6 +67,21 @@ def _rate_limits_block() -> Dict[str, Any]:
         "max_forum_posts_per_day": 3,
         "min_hours_between_attempts": 72,
         "max_consecutive_failures": 5,
+        # Content syndication has its own budget, deliberately separate from
+        # outreach: publishing publicly is a different risk from emailing a
+        # named contact, and the two must never compete for the same allowance.
+        "max_publishes_per_day": 3,
+        "min_hours_between_platform_posts": 24,
+        "max_content_failures": 3,
+        "platform_daily_limits": {
+            "devto": 1,
+            "hashnode": 1,
+            "medium": 1,
+            "wordpress": 2,
+            "coderlegion": 1,
+            "devdojo": 1,
+            "webhook": 3,
+        },
     }
 
 
@@ -76,6 +92,129 @@ def _scheduler_block() -> Dict[str, Any]:
         "dry_run": False,
         "llm_command": [],
         "llm_timeout_seconds": 120,
+    }
+
+
+def _publishing_block() -> Dict[str, Any]:
+    return {
+        "dry_run": False,
+        "batch_size": 3,
+        "interval_seconds": 10800,
+        "require_approval": True,
+        "enforce_quality_gate": True,
+        "request_delay_seconds": 2.0,
+        "timeout_seconds": 30,
+        "outbox_dir": "content_outbox",
+    }
+
+
+def _content_block() -> Dict[str, Any]:
+    return {
+        "enabled": False,
+        "audience": "",
+        "angle": "",
+        "tone": "practitioner writing for peers, no marketing voice",
+        "persona": "an engineer who maintains the project",
+        "disclosure": "I maintain this project.",
+        "disclosure_required": True,
+        "disclosure_note": (
+            "Full disclosure: I build and maintain this project. Every claim below "
+            "is something I have run in production, and I have linked the code so "
+            "you can check it rather than take my word for it."
+        ),
+        "license": "",
+        "sections": [
+            "The problem",
+            "What the project does",
+            "How it is built",
+            "Try it",
+            "Where it stops being useful",
+            "Feedback",
+        ],
+        "tags": ["opensource", "devops"],
+        "default_platforms": [],
+        "canonical_base_url": "",
+        "call_to_action": "",
+        "closing": "",
+        "min_words": 350,
+        "max_words": 1800,
+        "max_title_words": 12,
+        "summary_max_chars": 300,
+        "forbid_words": [],
+        "topics": [],
+    }
+
+
+def _platforms_block(enabled: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Every target, off by default. ``enabled`` opts a subset in.
+
+    Written out in full rather than left empty so the wizard has real fields to
+    bind and an operator can see every knob without opening config.example.yaml.
+    """
+    on = {pid for pid in (enabled or [])}
+    return {
+        "devto": {
+            "enabled": "devto" in on,
+            "api_base": "https://dev.to/api",
+            "api_key_env": "DEVTO_API_KEY",
+            "organization_username": "",
+            "state_published": False,
+            "series": "",
+        },
+        "hashnode": {
+            "enabled": "hashnode" in on,
+            "api_base": "https://gql.hashnode.com",
+            "api_key_env": "HASHNODE_PAT",
+            "publication_id": "",
+            "publish_immediately": True,
+            "enable_toc": True,
+            "subtitle": "",
+        },
+        "medium": {
+            # Legacy: Medium issues no new integration tokens (since 2025-01-01).
+            # Left off; see the note rendered by `platforms`.
+            "enabled": False,
+            "api_base": "https://api.medium.com/v1",
+            "api_key_env": "MEDIUM_TOKEN",
+            "author_id": "",
+            "publication_id": "",
+            "content_format": "html",
+            "publish_status": "public",
+            "license": "all-rights-reserved",
+        },
+        "wordpress": {
+            "enabled": "wordpress" in on,
+            "flavor": "wordpress_com",
+            "site": "",
+            "site_url": "",
+            "auth_mode": "application_password",
+            "username_env": "WP_USERNAME",
+            "password_env": "WP_APP_PASSWORD",
+            "oauth_env": "WPCOM_OAUTH_TOKEN",
+            "status": "publish",
+            "categories": [],
+        },
+        "coderlegion": {
+            "enabled": "coderlegion" in on,
+            "submit_url": "https://coderlegion.com/publish-with-us",
+            "guidelines_url": "https://coderlegion.com/publish-with-us",
+            "categories": ["Articles"],
+            "tags": [],
+        },
+        "devdojo": {
+            "enabled": "devdojo" in on,
+            "submit_url": "https://devdojo.com/community/posts/write",
+            "guidelines_url": "https://devdojo.com/community/posts",
+            "tags": [],
+        },
+        "webhook": {
+            "enabled": False,
+            "url_env": "WEBHOOK_URL",
+            "method": "POST",
+            "auth_header": "Authorization",
+            "auth_scheme": "Bearer",
+            "include_markdown": True,
+        },
     }
 
 
@@ -171,6 +310,9 @@ def generic_template() -> Dict[str, Any]:
         ),
         "forum": _forum_block("Community Forum", "https://community.example.com/"),
         "github": _github_block(["your-topic"]),
+        "content": _content_block(),
+        "platforms": _platforms_block(),
+        "publishing": _publishing_block(),
         "sponsors": [],
         "rate_limits": _rate_limits_block(),
         "scheduler": _scheduler_block(),
@@ -222,6 +364,26 @@ def genesys_template() -> Dict[str, Any]:
         "https://community.genesys.cloud/discussion/appfoundry",
     )
     data["github"] = _github_block(["genesys", "genesys-cloud"])
+    data["content"].update(
+        {
+            "audience": (
+                "Genesys Cloud developers and contact-centre architects who keep "
+                "rebuilding the same integrations in each new project."
+            ),
+            "angle": (
+                "The hard part of any Genesys Cloud integration is not the API "
+                "calls, it is the token lifecycle, the retry policy and the "
+                "idempotency around them - and that part should be written once, "
+                "tested once, and reused."
+            ),
+            "tags": ["genesys", "genesys-cloud", "cloud", "opensource"],
+            "license": "MIT",
+            "call_to_action": (
+                "If you have hit the same token-refresh or duplicate-write "
+                "problems, I would like to hear how you solved them."
+            ),
+        }
+    )
     return data
 
 
@@ -455,3 +617,55 @@ def normalize_topic(value: str) -> str:
 
 
 CHANNEL_CHOICES = list(CHANNELS)
+
+#: Flattened `content.*` bindings the wizard renders, so the Content step stays
+#: declarative instead of hard-coding ~20 field() calls.
+CONTENT_BINDINGS = (
+    ("enabled", "Content syndication enabled", "check"),
+    ("audience", "Audience", "area"),
+    ("angle", "Editorial angle (the thesis)", "area"),
+    ("tone", "Tone", "text"),
+    ("persona", "Who is speaking", "text"),
+    ("disclosure", "Disclosure line (top of every article)", "text"),
+    ("disclosure_required", "Refuse articles without a disclosure", "check"),
+    ("disclosure_note", "Disclosure note (footer)", "area"),
+    ("license", "Licence", "text"),
+    ("tags", "Default tags (one per line)", "list"),
+    ("canonical_base_url", "Canonical URL (where the article really lives)", "text"),
+    ("call_to_action", "Call to action", "area"),
+    ("closing", "Closing paragraph", "area"),
+    ("sections", "Sections (one per line)", "list"),
+    ("min_words", "Minimum words", "number"),
+    ("max_words", "Maximum words", "number"),
+    ("max_title_words", "Maximum title words", "number"),
+    ("forbid_words", "Extra banned words (one per line)", "list"),
+)
+
+
+def platform_bindings() -> List[Dict[str, Any]]:
+    """Per-platform rows for the wizard's platform list.
+
+    `field` is the *meaningful* knob for that platform, chosen from its
+    `PlatformSpec` rather than hard-coded here, so a new registry entry shows up
+    in the UI without touching this module.
+    """
+    from platforms import PLATFORMS, PLATFORM_IDS
+
+    rows: List[Dict[str, Any]] = []
+    for platform_id in PLATFORM_IDS:
+        spec = PLATFORMS[platform_id]
+        rows.append(
+            {
+                "id": spec.id,
+                "label": spec.label,
+                "kind": spec.kind,
+                "legacy": spec.legacy,
+                "token_env": spec.token_env,
+                "token_help": spec.token_help,
+                "docs_url": spec.docs_url,
+                "submission_url": spec.submission_url,
+                "tag_limit": spec.tag_limit,
+                "notes": spec.notes,
+            }
+        )
+    return rows

@@ -45,6 +45,18 @@ _APP_LOGGERS = {
     "forum-sender",
     "llm",
     "webapp",
+    # Content syndication pipeline.
+    "promoter",
+    "content-engine",
+    "content-store",
+    "publishers",
+    "publisher-devto",
+    "publisher-hashnode",
+    "publisher-medium",
+    "publisher-wp",
+    "publisher-manual",
+    "publisher-webhook",
+    "state",
 }
 
 
@@ -563,6 +575,323 @@ def send_sponsors(
 # --------------------------------------------------------------------------- #
 # Reporting
 # --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+# Content syndication
+#
+# Same rule as the rest of this module: the wizard calls the CLI's modules, it
+# never re-implements them. Every long operation runs through `Promoter`, so the
+# web UI inherits the quality gate, the per-platform quotas, the cooldown and the
+# persist-after-every-publish guarantee for free.
+# --------------------------------------------------------------------------- #
+
+
+def build_content_store(config: Config):
+    """The campaign's content ledger."""
+    from promoter import build_store
+
+    return build_store(config)
+
+
+def content_summary(config: Config) -> Dict[str, Any]:
+    """Ledger summary plus the registry, for the Content step."""
+    from content_engine import status_help
+    from platforms import catalog
+    from publishers import check_all
+
+    store = build_content_store(config)
+    data = content_data_from_config(config)
+    prepared: List[Dict[str, Any]] = []
+    for item in store.all():
+        entry = item.to_dict()
+        entry["gate"] = _gate_for(data, item)
+        prepared.append(entry)
+    return {
+        "enabled": config.publishing_enabled,
+        "content": data,
+        "items": prepared,
+        "summary": store.summary(),
+        "statuses": list(config.content_statuses),
+        "status_help": status_help(),
+        "platforms": catalog(),
+        "readiness": check_all(config, dry_run=True),
+        "enforce_gate": config.bool("publishing.enforce_quality_gate", True),
+        "require_approval": config.bool("publishing.require_approval", True),
+        "default_platforms": content_data_from_config(config).get("default_platforms") or [],
+    }
+
+
+def content_data_from_config(config: Config) -> Dict[str, Any]:
+    from content_engine import content_data_from_config as _project
+
+    return _project(config)
+
+
+def _gate_for(data: Dict[str, Any], item) -> List[Dict[str, Any]]:  # noqa: ANN001
+    """Per-platform gate findings for one article, as structured rows."""
+    from content_engine import prepare_for_platform
+
+    rows: List[Dict[str, Any]] = []
+    for platform in item.platforms:
+        shaped = prepare_for_platform(
+            data,
+            title=item.title,
+            body=item.body_markdown,
+            summary=item.summary,
+            tags=item.tags,
+            platform=platform,
+        )
+        rows.append(
+            {
+                "platform": platform,
+                "publishable": shaped["publishable"],
+                "words": shaped["words"],
+                "tags": shaped["tags"],
+                "problems": shaped["problems"],
+            }
+        )
+    return rows
+
+
+def draft_article(
+    config: Config,
+    *,
+    title: str = "",
+    topic: str = "",
+    platforms: Optional[List[str]] = None,
+    use_llm: bool = False,
+    approve: bool = False,
+) -> Dict[str, Any]:
+    """Compose an article into the ledger. Never transmits."""
+    from content_store import ContentStore
+    from content_engine import generate
+    from models import ContentItem, PLATFORM_IDS
+
+    data = content_data_from_config(config)
+    store = build_content_store(config)
+    targets = [pid for pid in (platforms or config.platforms_enabled()) if pid in PLATFORM_IDS]
+    renderer = build_renderer(config, use_llm)
+    composed = generate(
+        data,
+        title=title,
+        topic=topic,
+        platform=targets[0] if targets else "",
+        llm_renderer=renderer,
+    )
+    item = ContentItem(
+        id=ContentStore.make_id(composed["title"], topic),
+        title=composed["title"],
+        body_markdown=composed["body"],
+        summary=composed["summary"],
+        topic=topic,
+        platforms=targets,
+        tags=[str(tag) for tag in (data.get("tags") or [])],
+        canonical_url=str(data.get("canonical_base_url") or ""),
+        status="draft",
+        source="composed",
+        words=int(composed.get("words") or 0),
+    )
+    item.fingerprint = item.compute_fingerprint()
+    with WRITE_LOCK:
+        stored, created = store.add(item)
+        if approve and stored.status == "draft":
+            stored = store.approve(stored.id)
+        store.save()
+    return {
+        "created": created,
+        "item": stored.to_dict(),
+        "gate": _gate_for(data, stored),
+        "renderer": composed.get("renderer") or "deterministic",
+    }
+
+
+def show_article(config: Config, item_id: str) -> Dict[str, Any]:
+    store = build_content_store(config)
+    item = store.require(item_id)
+    return {"item": item.to_dict(), "gate": _gate_for(content_data_from_config(config), item)}
+
+
+def update_article(config: Config, item_id: str, body: str, *, title: str = "") -> Dict[str, Any]:
+    """Replace an article's text from the editor, keeping its ledger intact."""
+    text = (body or "").strip()
+    if not text:
+        raise ValueError("the article body cannot be empty")
+    store = build_content_store(config)
+    with WRITE_LOCK:
+        item = store.require(item_id)
+        item.body_markdown = text
+        if title:
+            item.title = title.strip()
+        item.words = len(text.split())
+        item.fingerprint = item.compute_fingerprint()
+        item.updated_at = now_iso()
+        item.last_error = ""
+        item.sync_status()
+        store.save()
+    return {"item": item.to_dict(), "gate": _gate_for(content_data_from_config(config), item)}
+
+
+def mark_article(config: Config, item_id: str, status: str) -> Dict[str, Any]:
+    store = build_content_store(config)
+    with WRITE_LOCK:
+        item = store.update_status(item_id, status)
+        store.save()
+    return {"item": item.to_dict()}
+
+
+def approve_article(config: Config, item_id: str) -> Dict[str, Any]:
+    store = build_content_store(config)
+    with WRITE_LOCK:
+        item = store.approve(item_id)
+        store.save()
+    return {
+        "item": item.to_dict(),
+        "pending_platforms": item.pending_platforms(),
+        "publishing_enabled": config.publishing_enabled,
+    }
+
+
+def confirm_article(config: Config, item_id: str, platform: str, url: str) -> Dict[str, Any]:
+    store = build_content_store(config)
+    with WRITE_LOCK:
+        item = store.confirm(item_id, platform, url=url)
+        store.save()
+    return {"item": item.to_dict(), "live_urls": item.live_urls()}
+
+
+def reset_article(config: Config, item_id: str, platform: str) -> Dict[str, Any]:
+    store = build_content_store(config)
+    with WRITE_LOCK:
+        item = store.unconfirm(item_id, platform)
+        store.save()
+    return {"item": item.to_dict()}
+
+
+def remove_article(config: Config, item_id: str) -> Dict[str, Any]:
+    store = build_content_store(config)
+    with WRITE_LOCK:
+        item = store.remove(item_id)
+        store.save()
+    return {"removed": item.id}
+
+
+def publish_content(
+    config: Config,
+    ctx,
+    *,
+    item_ids: Optional[List[str]] = None,
+    platforms: Optional[List[str]] = None,
+    dry_run: bool = True,
+    batch: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Run one publish tick on a background job.
+
+    Delivery goes through `Promoter.tick()`, so the web UI cannot publish an
+    article the CLI would refuse, and every successful publish is persisted
+    before the next one is attempted.
+    """
+    from promoter import Promoter
+
+    if not config.publishing_enabled:
+        raise ValueError(
+            "content syndication is off - set content.enabled: true and at least one "
+            "platforms.<id>.enabled: true"
+        )
+
+    WRITE_LOCK.acquire()
+    try:
+        store = build_content_store(config)
+        promoter = Promoter(
+            config,
+            store,
+            dry_run=dry_run,
+            batch_size=int(batch) if batch else None,
+        )
+        pending = store.next_targets(
+            promoter.batch_size,
+            platforms=platforms or promoter.platforms,
+            item_ids=item_ids,
+            statuses=promoter.publishable_statuses,
+        )
+        if not pending:
+            ctx.log("Nothing to publish. Draft an article and approve it first.")
+            return {"result": _empty_tick(), "summary": store.summary()}
+
+        ctx.progress(stage="publishing", total=len(pending))
+        ctx.log(
+            f"{'DRY RUN' if dry_run else 'LIVE'} publish of {len(pending)} "
+            f"article/platform pair(s)"
+        )
+        for target in pending:
+            ctx.log(f"  {target.item_id} -> {target.platform}: {target.item.title}")
+        with capture_logs(ctx.log):
+            result = promoter.publish_targets(pending)
+        store.save()
+        ctx.progress(
+            stage="done",
+            published=result.published,
+            drafted=result.drafted,
+            queued=result.queued,
+            failed=result.failed,
+        )
+        summary = store.summary()
+    finally:
+        WRITE_LOCK.release()
+
+    payload: Dict[str, Any] = {"result": result.to_dict(), "summary": summary}
+    if result.queued:
+        from content_engine import approve_hint
+
+        payload["hint"] = approve_hint()
+        ctx.log("Manual platforms need a confirmed URL. " + approve_hint())
+    return payload
+
+
+def _empty_tick() -> Dict[str, Any]:
+    return {
+        "attempted": 0,
+        "published": 0,
+        "drafted": 0,
+        "queued": 0,
+        "failed": 0,
+        "skipped": 0,
+        "records": [],
+        "notes": ["nothing to publish"],
+    }
+
+
+def set_content_secrets(
+    config: Config, *, values: Dict[str, str]
+) -> Dict[str, Any]:
+    """Put platform credentials in the process environment only - never on disk.
+
+    `values` maps a platform id to the credential the operator typed. Which
+    environment variable receives it comes from that platform's own config, so
+    the UI never has to know the variable names.
+    """
+    from publishers import get_publisher
+
+    applied: List[str] = []
+    problems: Dict[str, str] = {}
+    for platform_id, value in (values or {}).items():
+        secret = str(value or "").strip()
+        if not secret:
+            continue
+        try:
+            publisher = get_publisher(platform_id, config, dry_run=True)
+        except Exception as exc:  # noqa: BLE001 - one bad target must not block the rest
+            problems[platform_id] = f"{type(exc).__name__}: {exc}"
+            continue
+        env_names = getattr(publisher, "token_envs", [])
+        if not env_names:
+            problems[platform_id] = f"{platform_id} needs no credential"
+            continue
+        os.environ[env_names[0]] = secret
+        applied.append(f"{platform_id} -> {env_names[0]}")
+
+    LOG.info("Publishing credentials updated in memory: %s", ", ".join(applied) or "(none)")
+    return {"applied": applied, "problems": problems}
 
 
 def status(config: Config, tracker: SponsorTracker) -> Dict[str, Any]:

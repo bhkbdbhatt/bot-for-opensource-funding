@@ -6,14 +6,14 @@ Pipeline:  new -> contacted -> replied -> sponsored
 The tracker file is written atomically (temp file + os.replace) so a crash
 mid-write can never corrupt state. Daily rate-limit counters live in the same
 file, which keeps rate limiting honest across process restarts.
+
+Persistence, the daily counters, the cooldown gate and the bounded event log are
+all provided by `state.py`, which `content_store.py` shares - the two pipelines
+must not drift apart on how they keep state safe.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -30,8 +30,8 @@ from models import (
     Sponsor,
     normalize_name,
     now_iso,
-    today_str,
 )
+from state import AtomicJsonStore, BoundedLog, DailyCounters, StateError, cooldown_reason
 
 LOG = get_logger("tracker")
 
@@ -54,8 +54,10 @@ class SponsorNotFound(TrackerError):
 # --------------------------------------------------------------------------- #
 
 
-class SponsorTracker:
+class SponsorTracker(AtomicJsonStore):
     """In-memory view over the JSON tracker file."""
+
+    schema_version = SCHEMA_VERSION
 
     def __init__(
         self,
@@ -64,12 +66,12 @@ class SponsorTracker:
         seed_sponsors: Optional[Iterable[Dict[str, Any]]] = None,
         rate_limits: Optional[Dict[str, int]] = None,
     ) -> None:
-        self.path = Path(path).expanduser()
+        super().__init__(path)
         self.rate_limits = dict(rate_limits or {CHANNEL_EMAIL: 15, CHANNEL_FORUM: 3})
         self._sponsors: Dict[str, Sponsor] = {}
         self._seen: Dict[str, Dict[str, Any]] = {}
-        self._history: List[Dict[str, Any]] = []
-        self._counters: Dict[str, Any] = {"date": today_str(), CHANNEL_EMAIL: 0, CHANNEL_FORUM: 0}
+        self._history = BoundedLog([], limit=MAX_HISTORY)
+        self._counters = DailyCounters(keys=list(CHANNELS))
         self._load()
         if not self.path.exists():
             self._seed(seed_sponsors or [])
@@ -77,38 +79,18 @@ class SponsorTracker:
 
     # -- persistence ------------------------------------------------------- #
 
-    def _empty_state(self) -> Dict[str, Any]:
+    def _document(self) -> Dict[str, Any]:
         return {
             "version": SCHEMA_VERSION,
-            "sponsors": [],
-            "seen": {},
-            "rate_counters": {"date": today_str(), CHANNEL_EMAIL: 0, CHANNEL_FORUM: 0},
-            "history": [],
+            "sponsors": [self._sponsors[key].to_dict() for key in sorted(self._sponsors)],
+            "seen": self._seen,
+            "rate_counters": self._counters.to_dict(),
+            "history": self._history.to_list(),
         }
 
     def _load(self) -> None:
-        if not self.path.is_file():
-            return
-        try:
-            state = json.loads(self.path.read_text(encoding="utf-8") or "{}")
-        except json.JSONDecodeError as exc:
-            backup = self.path.with_suffix(self.path.suffix + ".corrupt")
-            try:
-                self.path.replace(backup)
-                LOG.error(
-                    "Tracker file is corrupt (%s). Moved to %s and starting fresh.",
-                    exc,
-                    backup,
-                )
-            except OSError:
-                LOG.error("Tracker file is corrupt (%s) and could not be moved.", exc)
-            return
-        except OSError as exc:
-            LOG.warning("Could not read tracker %s: %s", self.path, exc)
-            return
-
-        if not isinstance(state, dict):
-            LOG.error("Tracker root is not an object; ignoring %s", self.path)
+        state = self.load()
+        if not state:
             return
 
         for raw in state.get("sponsors") or []:
@@ -132,54 +114,18 @@ class SponsorTracker:
             self._seen = seen
         history = state.get("history")
         if isinstance(history, list):
-            self._history = [entry for entry in history if isinstance(entry, dict)]
+            self._history = BoundedLog(history, limit=MAX_HISTORY)
         counters = state.get("rate_counters")
         if isinstance(counters, dict):
-            self._counters = {
-                "date": str(counters.get("date") or today_str()),
-                CHANNEL_EMAIL: int(counters.get(CHANNEL_EMAIL) or 0),
-                CHANNEL_FORUM: int(counters.get(CHANNEL_FORUM) or 0),
-            }
-        self._roll_counters()
-
-    def _state(self) -> Dict[str, Any]:
-        state = self._empty_state()
-        state.update(
-            {
-                "sponsors": [self._sponsors[key].to_dict() for key in sorted(self._sponsors)],
-                "seen": self._seen,
-                "rate_counters": self._counters,
-                "history": self._history[-MAX_HISTORY:],
-                "updated_at": now_iso(),
-            }
-        )
-        return state
+            self._counters = DailyCounters(counters, keys=list(CHANNELS))
+        self._counters.roll()
 
     def save(self) -> None:
         """Atomically persist state."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(self._state(), indent=2, ensure_ascii=False)
-        handle = tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=str(self.path.parent),
-            prefix=f".{self.path.name}.",
-            suffix=".tmp",
-            delete=False,
-        )
         try:
-            with handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(handle.name, self.path)
-        except OSError as exc:
-            LOG.error("Failed to persist tracker %s: %s", self.path, exc)
-            try:
-                os.unlink(handle.name)
-            except OSError:
-                pass
-            raise TrackerError(f"cannot write tracker file {self.path}: {exc}") from exc
+            super().save()
+        except StateError as exc:
+            raise TrackerError(str(exc)) from exc
 
     def _seed(self, entries: Iterable[Dict[str, Any]]) -> None:
         count = 0
@@ -202,11 +148,7 @@ class SponsorTracker:
             LOG.info("Seeded %d sponsor(s) from config", count)
 
     def _record(self, event: str, **fields: Any) -> None:
-        entry = {"at": now_iso(), "event": event}
-        entry.update(fields)
-        self._history.append(entry)
-        if len(self._history) > MAX_HISTORY:
-            self._history = self._history[-MAX_HISTORY:]
+        self._history.append(event, **fields)
 
     # -- CRUD -------------------------------------------------------------- #
 
@@ -309,17 +251,13 @@ class SponsorTracker:
         if used >= limit:
             return False, f"daily {channel} limit reached ({used}/{limit})"
 
-        if min_hours_between_attempts > 0 and sponsor.attempts and sponsor.last_contacted_at:
-            try:
-                last = datetime.fromisoformat(sponsor.last_contacted_at)
-            except ValueError:
-                last = datetime.now()
-            elapsed = datetime.now(last.tzinfo) - last
-            if elapsed < timedelta(hours=min_hours_between_attempts):
-                remaining = int(
-                    (timedelta(hours=min_hours_between_attempts) - elapsed).total_seconds() // 60
-                )
-                return False, f"cooling down ({remaining} min since last attempt)"
+        reason = cooldown_reason(
+            sponsor.last_contacted_at,
+            min_hours_between_attempts,
+            attempts=sponsor.attempts,
+        )
+        if reason:
+            return False, reason
         return True, "ok"
 
     def record_send(self, name: str, channel: str, *, ok: bool, error: str = "") -> Sponsor:
@@ -327,7 +265,7 @@ class SponsorTracker:
         sponsor.attempts += 1
         sponsor.updated_at = now_iso()
         if ok:
-            self._bump_counter(channel)
+            self._counters.bump(channel)
             if sponsor.status == STATUS_NEW:
                 sponsor.status = STATUS_CONTACTED
             sponsor.last_contacted_at = now_iso()
@@ -343,32 +281,11 @@ class SponsorTracker:
         )
         return sponsor
 
-    def _roll_counters(self) -> bool:
-        today = today_str()
-        if self._counters.get("date") == today:
-            return False
-        LOG.info("Rate counters reset for %s", today)
-        self._counters = {"date": today, CHANNEL_EMAIL: 0, CHANNEL_FORUM: 0}
-        return True
-
-    def _bump_counter(self, channel: str) -> None:
-        self._roll_counters()
-        self._counters[channel] = int(self._counters.get(channel, 0)) + 1
-
     def used_today(self, channel: str) -> int:
-        self._roll_counters()
-        return int(self._counters.get(channel, 0))
+        return self._counters.used(channel)
 
     def daily_usage(self) -> Dict[str, Dict[str, Any]]:
-        self._roll_counters()
-        return {
-            channel: {
-                "used": int(self._counters.get(channel, 0)),
-                "limit": int(self.rate_limits.get(channel, 0) or 0),
-                "remaining": max(int(self.rate_limits.get(channel, 0) or 0) - int(self._counters.get(channel, 0)), 0),
-            }
-            for channel in CHANNELS
-        }
+        return self._counters.usage(self.rate_limits)
 
     # -- discovery dedupe -------------------------------------------------- #
 
@@ -417,10 +334,10 @@ class SponsorTracker:
             "by_channel": by_channel,
             "failures": sum(1 for s in self._sponsors.values() if s.status == "failed"),
             "discovered_seen": self.seen_count(),
-            "rate_counters": dict(self._counters),
+            "rate_counters": self._counters.to_dict(),
             "daily_usage": self.daily_usage(),
-            "recent_history": self._history[-8:],
+            "recent_history": self._history.recent(8),
         }
 
     def history(self, limit: int = 20) -> List[Dict[str, Any]]:
-        return self._history[-max(int(limit), 0):]
+        return self._history.recent(limit)

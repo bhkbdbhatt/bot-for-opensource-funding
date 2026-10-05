@@ -6,7 +6,13 @@
 #     Copy-Item config.example.yaml config.yaml   # PowerShell
 #
 # Secrets are NEVER stored here. Reference environment variables instead, e.g.
-#     GITHUB_TOKEN, SMTP_PASSWORD, FORUM_API_KEY
+#     GITHUB_TOKEN, SMTP_PASSWORD, FORUM_API_KEY,
+#     DEVTO_API_KEY, HASHNODE_PAT, MEDIUM_TOKEN, WP_APP_PASSWORD
+#
+# The file drives two independent pipelines:
+#   * outreach    - discover -> track -> generate -> send   (email / forum)
+#   * syndication - brief  -> draft -> approve -> publish   (see `platforms:`)
+# Both are off unless you switch them on. Nothing is transmitted implicitly.
 # =============================================================================
 
 plugin:
@@ -203,8 +209,29 @@ rate_limits:
   # Stop the scheduler after this many consecutive send failures.
   max_consecutive_failures: 5
 
+  # --- Content syndication limits (separate budget from outreach) -----------
+  # Ceiling across ALL platforms combined, so one article cannot be sprayed
+  # everywhere in a single run. 0 disables the global cap.
+  max_publishes_per_day: 3
+  # Never touch the same (article, platform) pair twice inside this window.
+  # Applies after failed attempts too, so a broken credential is not retried
+  # on every tick.
+  min_hours_between_platform_posts: 24
+  # Stop the promoter after this many consecutive publish failures.
+  max_content_failures: 3
+  # Per-platform ceilings. Omit a key to fall back to the platform's own
+  # default (1/day for the developer communities, 3/day for your own blog).
+  platform_daily_limits:
+    devto: 1
+    hashnode: 1
+    medium: 1
+    wordpress: 2
+    coderlegion: 1
+    devdojo: 1
+    webhook: 3
+
 # -----------------------------------------------------------------------------
-# Scheduler
+# Scheduler (outreach)
 # -----------------------------------------------------------------------------
 scheduler:
   interval_seconds: 7200     # cron-like: every 2 hours
@@ -213,6 +240,7 @@ scheduler:
   # Optional: hand the rendered prompt to a local CLI tool instead of using the
   # built-in composer. The command receives the prompt on stdin and must print
   # the final message on stdout. Example: ["ollama", "run", "llama3.1"]
+  # Used by BOTH `generate`/`run` (outreach) and `draft`/`publish` (content).
   llm_command: []
   llm_timeout_seconds: 120
 
@@ -222,7 +250,253 @@ scheduler:
 paths:
   tracker_file: "sponsors.json"
   discovery_cache: "discovered.json"
+  content_file: "content.json"
   log_file: "bot.log"
   log_level: "INFO"
   log_max_bytes: 2097152
   log_backup_count: 3
+
+
+# #############################################################################
+#                                                                             #
+#   PIPELINE 2 - CONTENT SYNDICATION                                          #
+#                                                                             #
+#   Writes one article, then fans it out to every developer community you     #
+#   enable. Reads `plugin.*` for the facts; the `content` section below is the #
+#   editorial brief. Check readiness any time with:                           #
+#                                                                             #
+#       python main.py platforms                                              #
+#                                                                             #
+# #############################################################################
+
+# -----------------------------------------------------------------------------
+# The editorial brief
+#
+# Everything here is used by the deterministic composer (`python main.py draft`).
+# If you add `scheduler.llm_command`, the same facts are rendered into an LLM
+# prompt instead - the fields mean the same thing either way.
+# -----------------------------------------------------------------------------
+content:
+  enabled: false           # master switch. Nothing is published until this is true.
+
+  # Who the article is for. Be specific: "Genesys Cloud contact-centre
+  # architects" produces a better post than "developers".
+  audience: >-
+    Genesys Cloud developers and contact-centre architects who keep rebuilding
+    the same integrations in each new project.
+
+  # The thesis of the piece. One or two sentences, problem first. This becomes
+  # the opening paragraph and is reused as the post summary.
+  angle: >-
+    The hard part of any Genesys Cloud integration is not the API calls, it is
+    the token lifecycle, the retry policy and the idempotency around them - and
+    that part should be written once, tested once, and reused.
+
+  # How the article should sound, and who is speaking. Honesty about authorship
+  # is not optional: these communities remove undisclosed self-promotion, and
+  # `disclosure_required` below will refuse to publish without it.
+  tone: "practitioner writing for peers, no marketing voice"
+  persona: "an engineer who maintains the project and has debugged it in production"
+
+  # Shown at the top of every article. Say plainly that you maintain it.
+  disclosure: "I maintain this project."
+  disclosure_required: true      # refuse to publish an article that omits it
+  disclosure_note: >-
+    Full disclosure: I build and maintain this project. Every claim below is
+    something I have run in production, and I have linked the code so you can
+    check it rather than take my word for it.
+
+  # Licence, surfaced in the article body. Accurate licences build more trust
+  # with maintainers than any marketing claim.
+  license: "MIT"
+
+  # Section headings, in order. Rename freely; the composer keys its content
+  # off position, not off the text, so a custom list still produces a full post.
+  sections:
+    - "The problem"
+    - "What the project does"
+    - "How it is built"
+    - "Try it"
+    - "Where it stops being useful"
+    - "Feedback"
+
+  # Tags applied to every article, before each platform's own limit is applied.
+  # DEV takes at most 4; anything beyond the limit is trimmed, not rejected.
+  tags:
+    - "genesys"
+    - "genesys-cloud"
+    - "opentelemetry"
+    - "opensource"
+    - "cloud"
+
+  # Platforms new drafts target when `--platform` is omitted. Empty means
+  # "every platform you have enabled".
+  default_platforms: []
+
+  # Optional: where the canonical version of the article lives. Publish your own
+  # site first, then point dev.to / Hashnode at it - cross-posting without a
+  # canonical URL is how a syndicated article gets treated as duplicate content.
+  canonical_base_url: ""
+
+  # Appended after the body. Falls back to plugin.ask when empty.
+  call_to_action: >-
+    If you have hit the same token-refresh or duplicate-write problems, I would
+    like to hear how you solved them - the failure modes are the interesting part.
+
+  # Optional final paragraph.
+  closing: >-
+    Corrections and counter-examples are welcome. So are issues describing your
+    use case; that is the most useful input I can get.
+
+  # The quality gate. A draft that fails is never transmitted.
+  min_words: 350            # thin posts get rejected by community reviewers
+  max_words: 1800           # beyond this the composer trims at a sentence break
+  max_title_words: 12
+  summary_max_chars: 300
+
+  # Extra banned wording on top of the built-in hype list (revolutionary,
+  # game-changing, best-in-class, seamless, supercharge, unleash, 10x, ...).
+  forbid_words: []
+
+  # An optional content calendar. `python main.py draft` with no --topic uses the
+  # first entry, so a campaign can hold several distinct articles.
+  topics: []
+  #  - title: "Retry policies for contact-centre APIs"
+  #    angle: "Why exponential backoff without idempotency makes outages worse."
+  #    platforms: [devto, hashnode]
+  #  - title: "Tracing a Genesys conversation end to end"
+  #    platforms: [wordpress, devto]
+
+
+# -----------------------------------------------------------------------------
+# Syndication targets
+#
+# Every platform is OFF by default. `python main.py platforms` shows which are
+# ready and, when a credential is missing, exactly which variable to set and
+# where to get it.
+#
+# Three integration shapes exist, because the platforms genuinely differ:
+#   kind: api      a documented publishing API (used automatically)
+#   kind: manual   no public API - the article is written to content_outbox/
+#                  and you submit it; the ledger stays 'queued' until you
+#                  confirm the live URL with `content confirm`
+# -----------------------------------------------------------------------------
+platforms:
+
+  # --- DEV Community (dev.to) ----------------------------------------------
+  # Forem v1 REST API. Get a key at https://dev.to/settings/extensions
+  devto:
+    enabled: false
+    api_base: "https://dev.to/api"
+    api_key_env: "DEVTO_API_KEY"
+    # Post under a DEV organisation instead of your personal profile.
+    organization_username: ""
+    # false = create a DRAFT in your dashboard (safest first run).
+    # true  = publish immediately. Do this only once you trust the output.
+    state_published: false
+    # Optional: group posts into a DEV series.
+    series: ""
+    # max 4 tags on DEV; extras are trimmed by the content engine.
+
+  # --- Hashnode -----------------------------------------------------------
+  # GraphQL at https://gql.hashnode.com. Get a PAT at
+  # https://hashnode.com/settings/developer, then list your publications with:
+  #   $env:HASHNODE_PAT = "..."; python main.py platforms --probe hashnode
+  # NOTE: write mutations require a Pro plan. A free publication answers
+  # FORBIDDEN; that is a plan limitation, not a bug.
+  hashnode:
+    enabled: false
+    api_base: "https://gql.hashnode.com"
+    api_key_env: "HASHNODE_PAT"
+    publication_id: ""        # object id from --probe, NOT the subdomain
+    # true = publish on the first call; false = create a draft instead.
+    publish_immediately: true
+    enable_toc: true          # table of contents in the rendered post
+    subtitle: ""
+
+  # --- Medium -------------------------------------------------------------
+  # LEGACY. Medium stopped issuing integration tokens on 2025-01-01 and accepts
+  # no new integrations; pre-2025 tokens still work. Leave enabled: false
+  # unless you already hold one - otherwise use manual mode.
+  medium:
+    enabled: false
+    api_base: "https://api.medium.com/v1"
+    api_key_env: "MEDIUM_TOKEN"
+    author_id: ""             # from GET /v1/me - posts on your profile
+    publication_id: ""        # or post into a publication instead
+    # Medium expects a plain-HTML or canonical-markdown body.
+    content_format: "html"    # html | markdown
+    publish_status: "public"  # public | unlisted | draft
+    license: "all-rights-reserved"
+
+  # --- WordPress (WordPress.com or self-hosted) ---------------------------
+  # Your own site is the natural canonical home: publish here first, then set
+  # content.canonical_base_url to the permalink and syndicate outward.
+  # Credentials: Settings -> Applications -> Application password (WordPress.com)
+  # or Users -> Profile -> Application Passwords (self-hosted).
+  wordpress:
+    enabled: false
+    flavor: "wordpress_com"   # wordpress_com | self_hosted
+    # wordpress_com: site id or domain, e.g. "myblog.wordpress.com"
+    site: ""
+    # self_hosted: the site's base URL, e.g. "https://blog.example.com"
+    site_url: ""
+    # `application_password` uses username + app password over HTTP Basic.
+    # `oauth` uses a WordPress.com OAuth2 bearer token instead.
+    auth_mode: "application_password"
+    username_env: "WP_USERNAME"
+    password_env: "WP_APP_PASSWORD"
+    oauth_env: "WPCOM_OAUTH_TOKEN"
+    # Start as a draft and flip to publish once the HTML conversion looks right.
+    status: "publish"         # publish | draft | pending | private | future
+    categories: []            # e.g. ["DevOps", "Open Source"]
+
+  # --- CoderLegion (no publishing API) ------------------------------------
+  # Submissions go through the web app and their editorial team reviews them.
+  # The bot shapes the article, writes it to content_outbox/coderlegion/ and
+  # prints the paste-ready text. It stays 'queued' until you confirm the URL.
+  coderlegion:
+    enabled: false
+    submit_url: "https://coderlegion.com/publish-with-us"
+    guidelines_url: "https://coderlegion.com/publish-with-us"
+    categories: ["Articles"]
+    tags: []
+
+  # --- DevDojo (no publishing API) ----------------------------------------
+  # Same hand-off model as CoderLegion, via their "Write a Post" form.
+  devdojo:
+    enabled: false
+    submit_url: "https://devdojo.com/community/posts/write"
+    guidelines_url: "https://devdojo.com/community/posts"
+    tags: []
+
+  # --- Generic webhook (escape hatch) -------------------------------------
+  # One POST with {item, markdown, platforms, source}. Use it for Discourse,
+  # Ghost, an internal CMS, or any endpoint that accepts JSON.
+  webhook:
+    enabled: false
+    url_env: "WEBHOOK_URL"
+    method: "POST"            # POST | PUT
+    auth_header: "Authorization"
+    auth_scheme: "Bearer"
+    include_markdown: true
+
+
+# -----------------------------------------------------------------------------
+# Content publishing loop
+# -----------------------------------------------------------------------------
+publishing:
+  dry_run: false             # true = shape + check, never transmit
+  batch_size: 3              # (article, platform) pairs per tick
+  interval_seconds: 10800    # 3 hours - deliberately slower than outreach
+  # Nothing reaches a platform without a human moving it to `approved`.
+  require_approval: true
+  # Refuse to transmit a draft that fails the quality gate (thin, no project
+  # link, no disclosure, banned wording). Set false to publish anyway - the
+  # findings are still logged. Off means your posts may get removed.
+  enforce_quality_gate: true
+  # Seconds between outbound requests, so a burst never looks like a scraper.
+  request_delay_seconds: 2.0
+  timeout_seconds: 30
+  # Ready-to-paste markdown for manual platforms lands here, per platform.
+  outbox_dir: "content_outbox"

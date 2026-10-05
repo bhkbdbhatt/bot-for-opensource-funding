@@ -11,8 +11,86 @@ const STEPS = [
   { id: 3, title: 'Discover', sub: 'Find related projects' },
   { id: 4, title: 'Review', sub: 'Approve who to contact' },
   { id: 5, title: 'Outreach', sub: 'Preview and send' },
-  { id: 6, title: 'Dashboard', sub: 'Pipeline status' },
+  { id: 6, title: 'Content', sub: 'Write and syndicate articles' },
+  { id: 7, title: 'Dashboard', sub: 'Pipeline status' },
 ];
+
+const CONTENT_FIELDS = [
+  ['content.enabled', 'Content syndication enabled', 'check'],
+  ['content.audience', 'Audience', 'area'],
+  ['content.angle', 'Editorial angle (the thesis)', 'area'],
+  ['content.tone', 'Tone', 'text'],
+  ['content.persona', 'Who is speaking', 'text'],
+  ['content.disclosure', 'Disclosure line (top of every article)', 'text'],
+  ['content.disclosure_required', 'Refuse articles without a disclosure', 'check'],
+  ['content.disclosure_note', 'Disclosure note (footer)', 'area'],
+  ['content.license', 'Licence', 'text'],
+  ['content.tags', 'Default tags (one per line)', 'list'],
+  ['content.canonical_base_url', 'Canonical URL (where the article really lives)', 'text'],
+  ['content.call_to_action', 'Call to action', 'area'],
+  ['content.closing', 'Closing paragraph', 'area'],
+  ['content.sections', 'Sections (one per line)', 'list'],
+  ['content.min_words', 'Minimum words', 'number'],
+  ['content.max_words', 'Maximum words', 'number'],
+  ['content.max_title_words', 'Maximum title words', 'number'],
+  ['content.forbid_words', 'Extra banned words (one per line)', 'list'],
+];
+
+const PUBLISHING_FIELDS = [
+  ['publishing.dry_run', 'Dry run (never transmit)', 'check'],
+  ['publishing.require_approval', 'Require a human approval before publishing', 'check'],
+  ['publishing.enforce_quality_gate', 'Refuse drafts that fail the quality gate', 'check'],
+  ['publishing.batch_size', 'Pairs per tick', 'number'],
+  ['publishing.interval_seconds', 'Seconds between ticks', 'number'],
+  ['publishing.request_delay_seconds', 'Seconds between outbound requests', 'number'],
+  ['publishing.timeout_seconds', 'HTTP timeout (seconds)', 'number'],
+];
+
+const PLATFORM_FIELDS = {
+  devto: [
+    ['platforms.devto.api_key_env', 'API key env var', 'text'],
+    ['platforms.devto.organization_username', 'Organisation username', 'text'],
+    ['platforms.devto.state_published', 'Publish immediately (unchecked = create a draft)', 'check'],
+    ['platforms.devto.series', 'Series name', 'text'],
+  ],
+  hashnode: [
+    ['platforms.hashnode.api_key_env', 'Token env var', 'text'],
+    ['platforms.hashnode.publication_id', 'Publication id', 'text'],
+    ['platforms.hashnode.publish_immediately', 'Publish immediately (unchecked = draft)', 'check'],
+    ['platforms.hashnode.enable_toc', 'Table of contents', 'check'],
+  ],
+  medium: [
+    ['platforms.medium.api_key_env', 'Token env var', 'text'],
+    ['platforms.medium.author_id', 'Author id (profile posts)', 'text'],
+    ['platforms.medium.publication_id', 'Publication id (publication posts)', 'text'],
+    ['platforms.medium.content_format', 'Content format (html / markdown)', 'text'],
+    ['platforms.medium.publish_status', 'Publish status (public / unlisted / draft)', 'text'],
+  ],
+  wordpress: [
+    ['platforms.wordpress.flavor', 'Flavour (wordpress_com / self_hosted)', 'text'],
+    ['platforms.wordpress.site', 'Site id or domain', 'text'],
+    ['platforms.wordpress.site_url', 'Site URL (self-hosted)', 'text'],
+    ['platforms.wordpress.auth_mode', 'Auth mode (application_password / oauth)', 'text'],
+    ['platforms.wordpress.username_env', 'Username env var', 'text'],
+    ['platforms.wordpress.password_env', 'Application password env var', 'text'],
+    ['platforms.wordpress.oauth_env', 'OAuth token env var', 'text'],
+    ['platforms.wordpress.status', 'Post status (publish / draft)', 'text'],
+    ['platforms.wordpress.categories', 'Categories (comma separated)', 'csv'],
+  ],
+  coderlegion: [
+    ['platforms.coderlegion.submit_url', 'Submit at', 'text'],
+    ['platforms.coderlegion.categories', 'Categories (comma separated)', 'csv'],
+  ],
+  devdojo: [
+    ['platforms.devdojo.submit_url', 'Submit at', 'text'],
+  ],
+  webhook: [
+    ['platforms.webhook.url_env', 'Target URL env var', 'text'],
+    ['platforms.webhook.method', 'HTTP method', 'text'],
+    ['platforms.webhook.auth_header', 'Auth header', 'text'],
+    ['platforms.webhook.auth_scheme', 'Auth scheme', 'text'],
+  ],
+};
 
 const state = {
   version: '',
@@ -20,6 +98,9 @@ const state = {
   profiles: [],
   channels: ['email', 'forum'],
   statuses: ['new', 'contacted', 'replied', 'sponsored', 'failed'],
+  contentStatuses: ['draft', 'approved', 'queued', 'published', 'failed'],
+  platformIds: [],
+  platforms: [],
   profileId: null,
   profile: null,
   draft: null,
@@ -35,6 +116,13 @@ const state = {
   sendSelected: new Set(),
   sendDryRun: true,
   sendUseLlm: false,
+  content: null,
+  contentTab: 'write',
+  contentDraftResult: null,
+  contentTarget: new Set(),
+  contentDraftLlm: false,
+  contentPublishDryRun: true,
+  publishResult: null,
   job: null,
   jobKind: '',
   jobLogs: [],
@@ -595,7 +683,8 @@ function render() {
     case 3: main.innerHTML = renderDiscover(); break;
     case 4: main.innerHTML = renderReview(); break;
     case 5: main.innerHTML = renderOutreach(); break;
-    case 6: main.innerHTML = renderDashboard(); break;
+    case 6: main.innerHTML = renderContent(); break;
+    case 7: main.innerHTML = renderDashboard(); break;
     default: main.innerHTML = renderProject();
   }
 }
@@ -661,6 +750,38 @@ function checkField(label, bind) {
   const on = !!getPath(state.draft, bind, false);
   return '<label class="check"><input type="checkbox" data-bind="' + bind + '"' + (on ? ' checked' : '') + '> ' +
     esc(label) + '</label>';
+}
+
+function boundField(label, bind, kind) {
+  const value = getPath(state.draft, bind, kind === 'check' ? false : '');
+  const hint = '';
+  if (kind === 'check') {
+    return '<label class="check"><input type="checkbox" data-bind="' + bind + '"' +
+      (value ? ' checked' : '') + '> ' + esc(label) + '</label>';
+  }
+  if (kind === 'list') {
+    const list = Array.isArray(value) ? value.join('\n') : value;
+    return '<label class="field"><span>' + esc(label) + '</span>' +
+      '<textarea data-bind="' + bind + '" data-list="true" rows="4">' + esc(list) + '</textarea>' +
+      hint + '</label>';
+  }
+  if (kind === 'csv') {
+    const list = Array.isArray(value) ? value.join(', ') : value;
+    return '<label class="field"><span>' + esc(label) + '</span>' +
+      '<input type="text" data-bind="' + bind + '" data-list="true" value="' + esc(list) + '">' +
+      hint + '</label>';
+  }
+  if (kind === 'area') {
+    return '<label class="field"><span>' + esc(label) + '</span>' +
+      '<textarea data-bind="' + bind + '" rows="3">' + esc(value) + '</textarea>' + hint + '</label>';
+  }
+  if (kind === 'number') {
+    return '<label class="field"><span>' + esc(label) + '</span>' +
+      '<input type="number" data-bind="' + bind + '" value="' + esc(value === undefined || value === null ? 0 : value) + '">' +
+      hint + '</label>';
+  }
+  return '<label class="field"><span>' + esc(label) + '</span>' +
+    '<input type="text" data-bind="' + bind + '" value="' + esc(value) + '">' + hint + '</label>';
 }
 
 function flagCheck(label, flag, on) {
@@ -894,13 +1015,306 @@ function renderOutreach() {
     resultHtml;
 }
 
-/* ----------------------------------------------------------- step: dashboard */
+/* ------------------------------------------------------------ step: content */
+
+function contentReadiness() {
+  if (!state.content || !state.content.readiness) return {};
+  const map = {};
+  state.content.readiness.forEach((entry) => { map[entry.platform] = entry; });
+  return map;
+}
+
+function renderPlatformRows() {
+  const ready = contentReadiness();
+  const enabled = state.draft ? Object.keys(state.draft.platforms || {}) : [];
+  return (state.content && state.content.platforms ? state.content.platforms : []).map((spec) => {
+    const block = getPath(state.draft, 'platforms.' + spec.id, {}) || {};
+    const on = !!block.enabled;
+    const probe = ready[spec.id] || {};
+    const kindPill = spec.kind === 'manual'
+      ? pill('manual submit', 'info')
+      : (spec.kind === 'webhook' ? pill('webhook', '') : pill('api', 'good'));
+    const statusPill = spec.kind === 'manual'
+      ? (on ? pill('enabled', 'good') : pill('disabled', ''))
+      : (probe.ready ? pill('ready', 'good') : pill('not ready', 'warn'));
+    const reason = (!probe.ready && probe.reason && probe.reason !== 'ok')
+      ? '<div class="small muted">' + esc(truncate(probe.reason, 120)) + '</div>' : '';
+    const extra = (PLATFORM_FIELDS[spec.id] || [])
+      .map((entry) => boundField(entry[1], entry[0], entry[2])).join('');
+    const secret = spec.kind === 'manual' ? '' :
+      '<label class="field"><span>' + esc(spec.label) + ' credential (memory only)</span>' +
+      '<input type="password" data-secret="' + esc(spec.id) + '" placeholder="' +
+      esc(spec.token_env || 'not required') + '" autocomplete="off"></label>';
+    const body = on ? '<div class="platform-body">' + extra + secret + '</div>' : '';
+    return '<div class="platform-row' + (on ? ' on' : '') + '">' +
+      '<div class="flex between wrap"><div class="flex wrap">' +
+      '<label class="check"><input type="checkbox" data-bind="platforms.' + esc(spec.id) + '.enabled"' +
+      (on ? ' checked' : '') + '> <strong>' + esc(spec.label) + '</strong></label>' +
+      kindPill + statusPill +
+      (spec.legacy ? pill('legacy', 'warn') : '') +
+      '</div>' +
+      (spec.tag_limit ? pill('max ' + spec.tag_limit + ' tags', '') : '') +
+      '</div>' +
+      (spec.kind === 'manual'
+        ? '<div class="small muted">' + esc(spec.notes) + '</div>'
+        : (spec.token_help ? '<div class="small muted">Get a credential: <code>' +
+            esc(spec.token_help) + '</code></div>' : '')) +
+      reason + body + '</div>';
+  }).join('') || '<p class="hint">No platforms are registered in this build.</p>';
+}
+
+function contentItemRows() {
+  const items = (state.content && state.content.items) || [];
+  if (!items.length) {
+    return '<tr><td colspan="5" class="empty">No articles yet. Draft one on the Write tab.</td></tr>';
+  }
+  return items.map((item) => {
+    const pubs = item.publications || {};
+    const cells = (item.platforms || []).map((platform) => {
+      const entry = pubs[platform];
+      if (!entry) return '<span class="muted small">' + esc(platform) + ': pending</span>';
+      if (entry.status === 'live' && entry.url) {
+        return '<div><a href="' + esc(entry.url) + '" target="_blank" rel="noreferrer">' +
+          esc(platform) + '</a> <span class="muted small">live</span></div>';
+      }
+      if (entry.status === 'manual') {
+        return '<div class="small">' + esc(platform) + ': <span class="muted">awaiting your URL</span>' +
+          '<button class="link-btn small" data-action="content-confirm" data-id="' + esc(item.id) +
+          '" data-platform="' + esc(platform) + '">confirm</button></div>';
+      }
+      if (entry.status === 'failed') {
+        return '<div class="small">' + esc(platform) + ': <span class="muted">' +
+          esc(truncate(entry.last_error || 'failed', 60)) + '</span>' +
+          '<button class="link-btn small" data-action="content-reset" data-id="' + esc(item.id) +
+          '" data-platform="' + esc(platform) + '">retry</button></div>';
+      }
+      if (entry.status === 'draft') {
+        return '<div class="small">' + esc(platform) + ': <span class="muted">saved as draft</span>' +
+          '<button class="link-btn small" data-action="content-reset" data-id="' + esc(item.id) +
+          '" data-platform="' + esc(platform) + '">resend</button></div>';
+      }
+      return '<span class="muted small">' + esc(platform) + ': pending</span>';
+    }).join('');
+    const blocked = (item.gate || []).some((row) => !row.publishable);
+    const statusOptions = (state.contentStatuses || []).map((st) =>
+      '<option value="' + esc(st) + '"' + (st === item.status ? ' selected' : '') + '>' +
+      esc(st) + '</option>').join('');
+    return '<tr>' +
+      '<td><strong>' + esc(truncate(item.title, 60)) + '</strong>' +
+      '<div class="small muted mono">' + esc(item.id) + '</div>' +
+      (blocked ? '<div class="small"><span class="pill bad">quality gate</span></div>' : '') + '</td>' +
+      '<td class="mono">' + (item.words || 0) + '</td>' +
+      '<td><select data-content-mark="' + esc(item.id) + '">' + statusOptions + '</select></td>' +
+      '<td>' + cells + '</td>' +
+      '<td class="nowrap">' +
+      (item.status === 'draft'
+        ? '<button class="small primary" data-action="content-approve" data-id="' + esc(item.id) + '">Approve</button> '
+        : '') +
+      '<button class="small ghost" data-action="content-show" data-id="' + esc(item.id) + '">Open</button> ' +
+      '<button class="small danger" data-action="content-remove" data-id="' + esc(item.id) + '">Delete</button>' +
+      '</td></tr>';
+  }).join('');
+}
+
+function renderContentPublish() {
+  const info = state.content || {};
+  const summary = info.summary || {};
+  const usage = summary.daily_usage || {};
+  const enabled = getPath(state.draft, 'content.enabled', false);
+  const targets = enabledPlatformIds();
+  const selectedCount = pendingPairs().filter((row) => state.contentTarget.has(row.id + '|' + row.platform)).length;
+
+  const usageHtml = Object.keys(usage).filter((key) => usage[key].limit).map((key) => {
+    const u = usage[key];
+    const pct = u.limit ? Math.min(100, Math.round((u.used / u.limit) * 100)) : 0;
+    return '<div class="usage-item"><span class="name">' + esc(key) + '</span>' +
+      '<span class="bar"><i data-pct="' + pct + '"></i></span>' +
+      '<span class="small muted">' + u.used + '/' + u.limit + '</span></div>';
+  }).join('');
+
+  const pairRows = pendingPairs().map((row) => {
+    const key = row.id + '|' + row.platform;
+    return '<tr><td style="width:34px"><input type="checkbox" data-content-pair="' + esc(key) + '"' +
+      (state.contentTarget.has(key) ? ' checked' : '') + '></td>' +
+      '<td><strong>' + esc(truncate(row.title, 54)) + '</strong></td>' +
+      '<td>' + esc(row.platform) + '</td>' +
+      '<td class="mono small">' + (row.entry.status || 'pending') +
+      (row.entry.detail ? ' &middot; ' + esc(truncate(row.entry.detail, 46)) : '') + '</td></tr>';
+  }).join('') || '<tr><td colspan="4" class="empty">Nothing waiting. Approve an article first.</td></tr>';
+
+  let resultHtml = '';
+  if (state.publishResult && state.publishResult.result) {
+    const r = state.publishResult.result;
+    const rows = (r.records || []).map((rec) =>
+      '<tr><td>' + esc(truncate(rec.title, 44)) + '</td><td>' + esc(rec.platform) + '</td>' +
+      '<td>' + (rec.ok ? pill(rec.mode || 'ok', 'good') : pill('failed', 'bad')) + '</td>' +
+      '<td class="mono small">' + esc(rec.url || rec.detail || '') + '</td></tr>').join('');
+    resultHtml = '<div class="card"><h3>Last publish run</h3>' +
+      '<div class="flex wrap mb">' + pill('attempted ' + r.attempted, '') +
+      pill('published ' + r.published, 'good') + pill('drafted ' + r.drafted, '') +
+      pill('queued ' + r.queued, 'warn') + pill('failed ' + r.failed, r.failed ? 'bad' : '') +
+      pill('skipped ' + r.skipped, 'warn') + '</div>' +
+      (rows ? '<div class="table-wrap"><table><thead><tr><th>Article</th><th>Platform</th><th>Mode</th><th>Result</th></tr></thead><tbody>' + rows + '</tbody></table></div>' : '') +
+      ((r.notes || []).length ? '<ul class="list mt">' + r.notes.map((n) => '<li class="small muted">' + esc(n) + '</li>').join('') + '</ul>' : '') +
+      (state.publishResult.hint ? '<p class="hint">' + esc(state.publishResult.hint) + '</p>' : '') +
+      '</div>';
+  }
+
+  return '<div class="card"><div class="flex between wrap"><h3>Publish queue</h3>' +
+    '<div class="actions"><button class="small ghost" data-action="content-refresh">Refresh</button></div></div>' +
+    (enabled ? '' : '<p class="hint warn">Turn on <code>content.enabled</code> on the Brief tab before publishing.</p>') +
+    '<p class="hint">A tick sends one (article, platform) pair at a time. Per-platform daily caps and the cooldown apply, and every publish is written to the ledger before the next one starts.</p>' +
+    flagCheck('Dry run (shape and check, never transmit)', 'contentPublishDryRun', state.contentPublishDryRun) +
+    '<div class="actions mb"><button class="primary" data-action="content-publish"' +
+      (selectedCount ? '' : ' disabled') + '>Publish ' + selectedCount + ' selected</button>' +
+    '<button class="ghost" data-action="content-publish-all">Publish everything ready</button>' +
+    (state.job && state.jobKind === 'publish' && (state.job.state === 'running' || state.job.state === 'pending')
+      ? '<button class="danger" data-action="cancel-job">Cancel</button>' : '') +
+    '</div>' +
+    '<div class="table-wrap"><table><thead><tr><th style="width:34px"></th><th>Article</th><th>Platform</th><th>State</th></tr></thead><tbody>' +
+    pairRows + '</tbody></table></div></div>' +
+    '<div class="card"><h3>Publishing limits today</h3><div class="usage">' +
+    (usageHtml || '<p class="hint">No platforms enabled.</p>') + '</div></div>' +
+    '<div id="job-panel">' + (state.job && state.jobKind === 'publish' ? jobInner() : '') + '</div>' +
+    resultHtml;
+}
+
+function enabledPlatformIds() {
+  const block = getPath(state.draft, 'platforms', {}) || {};
+  return Object.keys(block).filter((key) => !!block[key].enabled);
+}
+
+function pendingPairs() {
+  const items = (state.content && state.content.items) || [];
+  const rows = [];
+  items.forEach((item) => {
+    if (item.status !== 'approved' && item.status !== 'queued') return;
+    (item.platforms || []).forEach((platform) => {
+      const entry = (item.publications || {})[platform];
+      if (entry && (entry.status === 'live' || entry.status === 'manual')) return;
+      rows.push({ id: item.id, title: item.title, platform: platform, entry: entry || {} });
+    });
+  });
+  return rows;
+}
+
+function renderContent() {
+  const info = state.content;
+  if (!info) return pageHead('Step 6', 'Content', 'Loading...');
+
+  const tabs = [
+    ['write', 'Write'],
+    ['brief', 'Brief'],
+    ['platforms', 'Platforms'],
+    ['articles', 'Articles'],
+    ['publish', 'Publish'],
+  ];
+  const tabBar = '<div class="tabs">' + tabs.map(([id, label]) =>
+    '<button class="tab' + (state.contentTab === id ? ' active' : '') +
+    '" data-action="content-tab" data-tab="' + id + '">' + esc(label) + '</button>').join('') + '</div>';
+
+  let body = '';
+  if (state.contentTab === 'brief') {
+    body = '<div class="card"><h3>Editorial brief</h3>' +
+      '<p class="hint">These facts drive both the built-in composer and the LLM prompt. An article that fails the quality gate is never transmitted.</p>' +
+      CONTENT_FIELDS.map((entry) => boundField(entry[1], entry[0], entry[2])).join('') +
+      '</div><div class="card"><h3>Publishing behaviour</h3>' +
+      PUBLISHING_FIELDS.map((entry) => boundField(entry[1], entry[0], entry[2])).join('') +
+      '<div class="actions"><button class="primary" data-action="save-profile">Save changes</button>' +
+      '<span class="small muted">' + (state.dirty ? 'Unsaved changes' : 'Saved') + '</span></div></div>';
+  } else if (state.contentTab === 'platforms') {
+    body = '<div class="card"><h3>Syndication targets</h3>' +
+      '<p class="hint">Every target is off until you enable it. Platforms marked <em>manual submit</em> have no publishing API: the bot prepares a paste-ready file and waits for you to confirm the live URL.</p>' +
+      renderPlatformRows() +
+      '<div class="actions"><button class="primary" data-action="save-profile">Save platform settings</button>' +
+      '<button data-action="content-save-secrets">Save credentials (memory only)</button></div></div>' +
+      '<div class="card"><h3>Publishing limits</h3>' +
+      '<div class="grid-2">' +
+      boundField('Max publishes per day (all platforms)', 'rate_limits.max_publishes_per_day', 'number') +
+      boundField('Hours between posts on one platform', 'rate_limits.min_hours_between_platform_posts', 'number') +
+      boundField('Stop after N consecutive failures', 'rate_limits.max_content_failures', 'number') +
+      '</div>' +
+      '<div class="actions"><button class="primary" data-action="save-profile">Save limits</button></div></div>';
+  } else if (state.contentTab === 'articles') {
+    body = '<div class="card"><div class="flex between wrap"><h3>Article ledger</h3>' +
+      '<div class="actions"><button class="small ghost" data-action="content-refresh">Refresh</button>' +
+      '<button class="small primary" data-action="content-tab" data-tab="write">Draft another</button></div></div>' +
+      '<p class="hint">Nothing reaches a platform without moving to <code>approved</code>. Manual targets sit at <code>queued</code> until you confirm the published URL.</p>' +
+      '<div class="table-wrap"><table><thead><tr><th>Article</th><th class="mono">Words</th><th>Status</th><th>Publications</th><th></th></tr></thead><tbody>' +
+      contentItemRows() + '</tbody></table></div></div>';
+  } else if (state.contentTab === 'publish') {
+    body = renderContentPublish();
+  } else {
+    const brief = info.content || {};
+    const enabled = enabledPlatformIds();
+    const platformBoxes = (state.platformIds || []).map((pid) => {
+      const spec = (state.platforms || []).find((entry) => entry.id === pid) || {};
+      const on = enabled.indexOf(pid) !== -1;
+      return '<label class="check"><input type="checkbox" data-content-platform="' + esc(pid) + '"' +
+        (on ? ' checked' : '') + '> ' + esc(spec.label || pid) +
+        (spec.kind === 'manual' ? ' <span class="muted small">(manual)</span>' : '') + '</label>';
+    }).join('');
+    body = '<div class="card"><h3>Compose an article</h3>' +
+      '<p class="hint">The composer uses your brief on the <em>Brief</em> tab. Set an LLM command on the Project step to render with a local model instead - the same facts, same gate.</p>' +
+      '<div class="grid-2">' +
+      '<label class="field"><span>Title (optional)</span><input type="text" id="cd-title" placeholder="Stop rebuilding the same integration"></label>' +
+      '<label class="field"><span>Topic / angle (optional)</span><input type="text" id="cd-topic" placeholder="retry policies for contact-centre APIs"></label>' +
+      '</div>' +
+      '<div class="small muted mb">Targets (defaults to every enabled platform)</div>' +
+      '<div class="flex wrap">' + (platformBoxes || '<span class="hint">Enable a platform first.</span>') + '</div>' +
+      '<div class="actions mt"><button class="primary" data-action="content-draft">Draft article</button>' +
+      flagCheck('Render with the configured LLM command', 'contentDraftLlm', state.contentDraftLlm) +
+      '</div></div>' +
+      '<div class="card"><h3>What the gate checks</h3>' +
+      '<ul class="list small">' +
+      '<li>At least ' + (brief.min_words || 350) + ' words and at most ' + (brief.max_words || 1800) + '.</li>' +
+      '<li>A link to your project repository or listing.</li>' +
+      '<li>An explicit statement that you maintain it' +
+      (brief.disclosure_required ? ' (required)' : ' (recommended)') + '.</li>' +
+      '<li>No hype wording' + ((brief.forbid_words || []).length
+        ? ': ' + esc((brief.forbid_words || []).join(', ')) : ' (the built-in list)') + '.</li>' +
+      '<li>A title within ' + (brief.max_title_words || 12) + ' words and at least two sections.</li>' +
+      '</ul></div>' +
+      '<div id="draft-result">' + renderDraftResult() + '</div>';
+  }
+
+  return pageHead('Step 6', 'Content', 'Author once, syndicate to every community you enable. Nothing is published without your approval.') +
+    tabBar + body;
+}
+
+function renderDraftResult() {
+  if (!state.contentDraftResult) return '';
+  const result = state.contentDraftResult;
+  const gate = result.gate || [];
+  const blocked = gate.filter((row) => !row.publishable);
+  const rows = gate.map((row) =>
+    '<tr><td>' + esc(row.platform) + '</td><td class="mono">' + (row.words || 0) + 'w</td>' +
+    '<td>' + (row.publishable ? pill('publishable', 'good') : pill('blocked', 'bad')) + '</td>' +
+    '<td class="mono small">' + esc((row.tags || []).join(', ')) + '</td>' +
+    '<td class="small muted">' + esc((row.problems || []).join('; ') || '-') + '</td></tr>').join('');
+  return '<div class="card"><h3>Drafted: ' + esc(truncate(result.item.title, 70)) + '</h3>' +
+    '<div class="flex wrap mb">' + pill((result.item.words || 0) + ' words', '') +
+    pill(result.renderer, 'info') + pill(result.item.status, 'warn') +
+    (blocked.length ? pill(blocked.length + ' platform(s) blocked', 'bad') : pill('all targets publishable', 'good')) +
+    '</div>' +
+    (rows ? '<div class="table-wrap"><table><thead><tr><th>Platform</th><th>Words</th><th>Gate</th><th>Tags</th><th>Findings</th></tr></thead><tbody>' + rows + '</tbody></table></div>' : '') +
+    '<div class="actions"><button data-action="content-show" data-id="' + esc(result.item.id) + '">Read it</button>' +
+    '<button class="primary" data-action="content-approve" data-id="' + esc(result.item.id) + '">Approve for publishing</button>' +
+    '</div>' +
+    (blocked.length ? '<p class="hint">The gate blocks publishing until these are fixed. Enrich the brief, or set ' +
+      '<code>publishing.enforce_quality_gate: false</code> to publish anyway.</p>' : '') +
+    '</div>';
+}
+
+/* ---------------------------------------------------------- step: dashboard */
 
 function renderDashboard() {
   const summary = state.sponsors ? state.sponsors.summary : null;
-  if (!summary) return pageHead('Step 6', 'Dashboard', 'Loading...');
+  if (!summary) return pageHead('Step 7', 'Dashboard', 'Loading...');
 
   const byStatus = summary.by_status || {};
+  const content = state.content ? state.content.summary : null;
+  const contentByStatus = (content && content.by_status) || {};
   const stats = '<div class="stats">' +
     stat(summary.total, 'Total contacts') +
     stat(byStatus.new || 0, 'New') +
@@ -908,6 +1322,9 @@ function renderDashboard() {
     stat(byStatus.replied || 0, 'Replied') +
     stat(byStatus.sponsored || 0, 'Sponsored') +
     stat(summary.failures || 0, 'Failures') +
+    (content ? stat(content.total || 0, 'Articles') : '') +
+    (content ? stat(content.pending_targets || 0, 'Pending publishes') : '') +
+    (content ? stat((content.live_urls || []).length, 'Live URLs') : '') +
     '</div>';
 
   const usage = summary.daily_usage || {};
@@ -918,6 +1335,30 @@ function renderDashboard() {
       '<span class="bar"><i data-pct="' + pct + '"></i></span>' +
       '<span class="small muted">' + u.used + '/' + u.limit + '</span></div>';
   }).join('');
+
+  let contentBlock = '';
+  if (content) {
+    const contentUsage = content.daily_usage || {};
+    const contentUsageHtml = Object.keys(contentUsage).filter((k) => contentUsage[k].limit).map((key) => {
+      const u = contentUsage[key];
+      const pct = u.limit ? Math.min(100, Math.round((u.used / u.limit) * 100)) : 0;
+      return '<div class="usage-item"><span class="name">' + esc(key) + '</span>' +
+        '<span class="bar"><i data-pct="' + pct + '"></i></span>' +
+        '<span class="small muted">' + u.used + '/' + u.limit + '</span></div>';
+    }).join('');
+    contentBlock = '<div class="card"><div class="flex between wrap"><h3>Content syndication</h3>' +
+      '<button class="small ghost" data-action="content-tab-link" data-tab="articles">Open ledger</button></div>' +
+      '<div class="flex wrap mb">' +
+      Object.keys(contentByStatus).map((st) => pill(st + ' ' + contentByStatus[st], '')).join('') +
+      '</div>' +
+      '<div class="usage">' + (contentUsageHtml || '<p class="hint">No platforms enabled.</p>') + '</div>' +
+      ((content.live_urls || []).length
+        ? '<div class="mt"><div class="small muted">Live</div><ul class="list">' +
+          content.live_urls.map((url) => '<li class="small"><a href="' + esc(url) +
+            '" target="_blank" rel="noreferrer">' + esc(url) + '</a></li>').join('') + '</ul></div>'
+        : '') +
+      '</div>';
+  }
 
   const rows = state.sponsors.sponsors.length ? state.sponsors.sponsors.map((s) => {
     const statusOptions = state.statuses.map((st) =>
@@ -940,14 +1381,25 @@ function renderDashboard() {
       esc(entry.event || '') + '</strong> ' + esc(detail) + '</li>';
   }).join('');
 
-  return pageHead('Step 6', 'Dashboard', 'The current pipeline, daily rate limits and recent activity.') +
+  const contentHistory = content && content.recent_history ? content.recent_history.slice().reverse().map((entry) => {
+    const detail = Object.keys(entry).filter((k) => k !== 'at' && k !== 'event')
+      .map((k) => k + '=' + entry[k]).join(' ');
+    return '<li class="small"><span class="mono muted">' + esc(entry.at || '') + '</span> &middot; <strong>' +
+      esc(entry.event || '') + '</strong> ' + esc(detail) + '</li>';
+  }).join('') : '';
+
+  return pageHead('Step 7', 'Dashboard', 'Both pipelines: contact outreach on the left, content syndication below.') +
     stats +
-    '<div class="card"><h3>Rate limits today</h3><div class="usage">' + (usageHtml || '<p class="hint">No channels configured.</p>') + '</div></div>' +
+    '<div class="card"><h3>Outreach rate limits today</h3><div class="usage">' + (usageHtml || '<p class="hint">No channels configured.</p>') + '</div></div>' +
+    contentBlock +
     '<div class="card"><div class="flex between wrap"><h3>Contacts</h3>' +
     '<div class="actions"><button class="small" data-action="add-contact">+ Add contact</button>' +
     '<button class="small ghost" data-action="refresh-sponsors">Refresh</button></div></div>' +
     '<div class="table-wrap"><table><thead><tr><th>Name</th><th>Channel</th><th>Address</th><th class="mono">Attempts</th><th>Status</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>' +
-    '<div class="card"><h3>Recent activity</h3>' + (history ? '<ul class="list">' + history + '</ul>' : '<p class="hint">Nothing yet.</p>') + '</div>';
+    '<div class="card"><h3>Recent activity</h3>' +
+    (history ? '<ul class="list">' + history + '</ul>' : '<p class="hint">Nothing yet.</p>') +
+    (contentHistory ? '<h3 class="mt">Content activity</h3><ul class="list">' + contentHistory + '</ul>' : '') +
+    '</div>';
 }
 
 function stat(value, label) {
@@ -995,7 +1447,10 @@ async function runJob(kind, path, body) {
   state.jobKind = kind;
   state.jobLogs = [];
   state.jobLogCount = 0;
+  // Stale results from the previous run of this job kind would otherwise stay
+  // on screen next to the live log and read as the current outcome.
   if (kind === 'send') state.sendResult = null;
+  if (kind === 'publish') state.publishResult = null;
   render();
   pollJob();
 }
@@ -1039,7 +1494,7 @@ async function onJobFinished(job) {
     render();
     return;
   }
-  if (job.kind === 'discovery') {
+  if (kind === 'discovery') {
     state.candidates = (job.result && job.result.candidates) || [];
     state.selected = new Set();
     state.step = 4;
@@ -1050,6 +1505,15 @@ async function onJobFinished(job) {
     await loadSponsors();
     await loadStatus();
     toast('Delivery finished', 'success');
+    render();
+  } else if (job.kind === 'publish') {
+    state.publishResult = job.result;
+    await loadContent();
+    await loadStatus();
+    const r = (job.result && job.result.result) || {};
+    toast('Published ' + (r.published || 0) + ', drafted ' + (r.drafted || 0) +
+      ', queued ' + (r.queued || 0) + ', failed ' + (r.failed || 0),
+      r.failed ? 'warn' : 'success');
     render();
   } else {
     render();
@@ -1069,12 +1533,16 @@ async function selectProfile(id) {
     state.selected = new Set();
     state.sendSelected = new Set();
     state.sendResult = null;
+    state.contentDraftResult = null;
+    state.contentTarget = new Set();
+    state.publishResult = null;
     state.job = null;
     state.step = 1;
     try { state.github = await api('GET', '/api/profiles/' + id + '/github'); } catch (err) { /* keep defaults */ }
     await loadStatus();
     await loadSponsors();
     await loadCandidates();
+    await loadContent();
     render();
   } catch (err) {
     toast(err.message, 'error');
@@ -1108,6 +1576,230 @@ async function loadCandidates() {
     state.candidates = data.candidates || [];
   } catch (err) {
     state.candidates = [];
+  }
+}
+
+async function loadContent() {
+  if (!state.profileId) return;
+  try {
+    state.content = await api('GET', '/api/profiles/' + state.profileId + '/content');
+    if (!state.content.contentStatuses) state.contentStatuses = state.content.statuses || state.contentStatuses;
+    const ready = new Set(pendingPairs().map((row) => row.id + '|' + row.platform));
+    state.contentTarget = new Set(Array.from(ready).filter((key) => state.contentTarget.has(key)));
+    if (state.contentTarget.size === 0) state.contentTarget = ready;
+  } catch (err) {
+    state.content = null;
+  }
+}
+
+/* ----------------------------------------------------------- content actions */
+
+function actionContentTab(tab) {
+  state.contentTab = tab;
+  render();
+}
+
+function contentPlatformSelection() {
+  const boxes = $$('[data-content-platform]');
+  return boxes.filter((box) => box.checked).map((box) => box.dataset.contentPlatform);
+}
+
+async function actionContentDraft() {
+  if (state.dirty) {
+    const ok = await saveProfile();
+    if (!ok) return;
+  }
+  const title = ($('#cd-title') || {}).value || '';
+  const topic = ($('#cd-topic') || {}).value || '';
+  try {
+    const result = await api('POST', '/api/profiles/' + state.profileId + '/content/draft', {
+      title: title,
+      topic: topic,
+      platforms: contentPlatformSelection(),
+      llm: state.contentDraftLlm,
+    });
+    state.contentDraftResult = result;
+    await loadContent();
+    const blocked = (result.gate || []).filter((row) => !row.publishable).length;
+    toast(blocked
+      ? 'Drafted, but ' + blocked + ' platform(s) blocked by the quality gate'
+      : 'Drafted ' + result.item.words + ' words', blocked ? 'warn' : 'success');
+    render();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function actionContentApprove(itemId) {
+  try {
+    const result = await api('POST', '/api/profiles/' + state.profileId + '/content/approve', { id: itemId });
+    toast('Approved ' + result.item.id, 'success');
+    if (result.pending_platforms && result.pending_platforms.length) {
+      toast('Ready for: ' + result.pending_platforms.join(', '));
+    }
+    if (!result.publishing_enabled) {
+      toast('Content syndication is off - turn on content.enabled on the Brief tab.', 'warn');
+    }
+    await loadContent();
+    render();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function actionContentShow(itemId) {
+  try {
+    const result = await api('GET', '/api/profiles/' + state.profileId + '/content/items/' + encodeURIComponent(itemId));
+    const item = result.item;
+    const gate = (result.gate || []).map((row) =>
+      '<li class="small ' + (row.publishable ? '' : 'muted') + '"><strong>' + esc(row.platform) +
+      '</strong> &middot; ' + row.words + 'w &middot; ' + esc((row.tags || []).join(', ') || 'no tags') +
+      (row.problems && row.problems.length ? '<br>' + esc(row.problems.join('; ')) : '') + '</li>').join('');
+    openModal('<h2>' + esc(item.title) + '</h2>' +
+      '<p class="hint">' + esc(item.id) + ' &middot; <strong>' + esc(item.status) + '</strong> &middot; ' +
+      (item.words || 0) + ' words</p>' +
+      (gate ? '<ul class="list small">' + gate + '</ul>' : '') +
+      '<pre class="message-preview">' + esc(item.body_markdown) + '</pre>' +
+      '<label class="field"><span>Edit the body (markdown)</span>' +
+      '<textarea id="ce-body" rows="10">' + esc(item.body_markdown) + '</textarea></label>' +
+      '<div class="actions mt"><button class="primary" data-action="content-save" data-id="' + esc(item.id) + '">Save body</button>' +
+      '<button data-action="close-modal">Close</button></div>');
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function actionContentSave(itemId) {
+  const body = ($('#ce-body') || {}).value || '';
+  try {
+    const result = await api('PUT', '/api/profiles/' + state.profileId + '/content/items/' + encodeURIComponent(itemId), { body: body });
+    const blocked = (result.gate || []).filter((row) => !row.publishable).length;
+    toast(blocked ? 'Saved, ' + blocked + ' platform(s) blocked by the gate' : 'Saved', blocked ? 'warn' : 'success');
+    await loadContent();
+    await actionContentShow(itemId);
+    render();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function actionContentMark(itemId, status) {
+  try {
+    await api('POST', '/api/profiles/' + state.profileId + '/content/mark', { id: itemId, status: status });
+    toast(itemId + ' -> ' + status, 'success');
+    await loadContent();
+    render();
+  } catch (err) {
+    toast(err.message, 'error');
+    await loadContent();
+    render();
+  }
+}
+
+async function actionContentConfirm(itemId, platform) {
+  openModal('<h2>Confirm publication</h2>' +
+    '<p class="hint">' + esc(platform) + ' has no publishing API, so the article was written to your ' +
+    'outbox. Paste the published URL here and the ledger records it as live.</p>' +
+    '<label class="field"><span>Live URL</span><input type="url" id="cc-url" placeholder="https://' +
+    esc(platform) + '/..."></label>' +
+    '<div class="actions"><button class="primary" data-action="content-confirm-go" data-id="' +
+    esc(itemId) + '" data-platform="' + esc(platform) + '">Confirm</button>' +
+    '<button class="ghost" data-action="close-modal">Cancel</button></div>');
+}
+
+async function actionContentConfirmGo(itemId, platform) {
+  const url = ($('#cc-url') || {}).value || '';
+  try {
+    const result = await api('POST', '/api/profiles/' + state.profileId + '/content/confirm', {
+      id: itemId, platform: platform, url: url,
+    });
+    closeModal();
+    toast(result.item.status === 'published' ? 'Fully syndicated' : 'Confirmed; other targets still pending', 'success');
+    await loadContent();
+    render();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function actionContentReset(itemId, platform) {
+  if (!confirm('Clear the recorded ' + platform + ' publication for "' + itemId + '" and offer it again?')) return;
+  try {
+    await api('POST', '/api/profiles/' + state.profileId + '/content/reset', { id: itemId, platform: platform });
+    toast('Reset ' + platform, 'success');
+    await loadContent();
+    render();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function actionContentRemove(itemId) {
+  if (!confirm('Delete "' + itemId + '" and its publication history?')) return;
+  try {
+    await api('POST', '/api/profiles/' + state.profileId + '/content/remove', { id: itemId });
+    toast('Deleted', 'success');
+    if (state.contentDraftResult && state.contentDraftResult.item.id === itemId) {
+      state.contentDraftResult = null;
+    }
+    await loadContent();
+    render();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+function contentSelectedPairs() {
+  const ids = new Set();
+  const platforms = new Set();
+  state.contentTarget.forEach((key) => {
+    const parts = key.split('|');
+    if (parts.length === 2) { ids.add(parts[0]); platforms.add(parts[1]); }
+  });
+  return { ids: Array.from(ids), platforms: Array.from(platforms) };
+}
+
+async function actionContentPublish(all) {
+  if (state.dirty) {
+    const ok = await saveProfile();
+    if (!ok) return;
+  }
+  let selection = contentSelectedPairs();
+  if (all) {
+    const rows = pendingPairs();
+    if (!rows.length) { toast('Nothing is waiting to publish', 'warn'); return; }
+    selection = { ids: rows.map((row) => row.id), platforms: rows.map((row) => row.platform) };
+  }
+  if (!selection.ids.length) { toast('Select at least one article to publish', 'warn'); return; }
+  if (!state.contentPublishDryRun) {
+    const manual = selection.platforms.filter((p) => ['coderlegion', 'devdojo'].indexOf(p) !== -1);
+    const warning = 'Live publish: this writes publicly to ' + selection.platforms.join(', ') + '.';
+    const extra = manual.length ? '\n\n' + manual.join(', ') + ' have no API, so they will be written to your outbox for you to submit.' : '';
+    if (!confirm(warning + extra + '\n\nThis cannot be undone.')) return;
+  }
+  await runJob('publish', '/api/profiles/' + state.profileId + '/content/publish', {
+    ids: selection.ids,
+    platforms: selection.platforms,
+    dry_run: state.contentPublishDryRun,
+  });
+}
+
+async function actionContentSaveSecrets() {
+  const values = {};
+  $$('[data-secret]').forEach((input) => {
+    const value = (input.value || '').trim();
+    if (value) values[input.dataset.secret] = value;
+  });
+  if (!Object.keys(values).length) { toast('No credentials entered', 'warn'); return; }
+  try {
+    const result = await api('POST', '/api/profiles/' + state.profileId + '/content/secrets', { values: values });
+    toast('Saved: ' + (result.applied.join(', ') || 'none'), 'success');
+    Object.keys(result.problems || {}).forEach((key) => toast(key + ': ' + result.problems[key], 'error'));
+    $$('[data-secret]').forEach((input) => { input.value = ''; });
+    await loadContent();
+    render();
+  } catch (err) {
+    toast(err.message, 'error');
   }
 }
 
@@ -1431,8 +2123,21 @@ document.addEventListener('click', (event) => {
     'refresh-sponsors': async () => { await loadSponsors(); await loadStatus(); render(); },
     'preview-sponsor': () => actionPreview(el.dataset.name),
     'remove-sponsor': () => actionRemove(el.dataset.name),
-  };
-  const handler = handlers[action];
+    'content-tab': () => actionContentTab(el.dataset.tab),
+    'content-tab-link': () => { state.step = 6; actionContentTab(el.dataset.tab); },
+    'content-draft': actionContentDraft,
+    'content-approve': () => actionContentApprove(el.dataset.id),
+    'content-show': () => actionContentShow(el.dataset.id),
+    'content-save': () => actionContentSave(el.dataset.id),
+    'content-confirm': () => actionContentConfirm(el.dataset.id, el.dataset.platform),
+    'content-confirm-go': () => actionContentConfirmGo(el.dataset.id, el.dataset.platform),
+    'content-reset': () => actionContentReset(el.dataset.id, el.dataset.platform),
+    'content-remove': () => actionContentRemove(el.dataset.id),
+    'content-publish': () => actionContentPublish(false),
+    'content-publish-all': () => actionContentPublish(true),
+    'content-save-secrets': actionContentSaveSecrets,
+    'content-refresh': async () => { await loadContent(); toast('Content reloaded'); render(); },
+  };  const handler = handlers[action];
   if (handler) {
     event.preventDefault();
     handler();
@@ -1479,6 +2184,17 @@ document.addEventListener('change', (event) => {
 
   const markEl = target.closest('[data-mark]');
   if (markEl) actionMark(markEl.dataset.mark, markEl.value);
+
+  const contentMarkEl = target.closest('[data-content-mark]');
+  if (contentMarkEl) actionContentMark(contentMarkEl.dataset.contentMark, contentMarkEl.value);
+
+  const pairEl = target.closest('[data-content-pair]');
+  if (pairEl) {
+    const key = pairEl.dataset.contentPair;
+    if (pairEl.checked) state.contentTarget.add(key); else state.contentTarget.delete(key);
+    const button = document.querySelector('[data-action="content-publish"]');
+    if (button) button.textContent = 'Publish ' + state.contentTarget.size + ' selected';
+  }
 });
 
 const profileSelect = $('#profile-select');
@@ -1532,6 +2248,9 @@ async function initApp() {
     state.profiles = data.profiles || [];
     state.channels = data.channels || ['email', 'forum'];
     state.statuses = data.statuses || state.statuses;
+    state.contentStatuses = data.content_statuses || state.contentStatuses;
+    state.platformIds = data.platform_ids || state.platformIds;
+    state.platforms = data.platforms || state.platforms;
     state.github = data.github || state.github;
     if (state.profiles.length) {
       await selectProfile(state.profiles[0].id);

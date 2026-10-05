@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 """GenesysPluginSponsorBot - command line interface.
 
+Two pipelines, one binary.
+
+Outreach (1:1, a named person):
     python main.py discover        # scrape GitHub topics for new prospects
     python main.py add-sponsor ... # add a prospect manually
     python main.py generate ...    # dry-run: print the message, send nothing
     python main.py run             # start the rate-limited scheduler
     python main.py status          # pipeline summary
     python main.py list            # every sponsor and status
+
+Content syndication (1:N, a platform audience):
+    python main.py platforms       # what is configured and whether it is ready
+    python main.py draft           # compose an article into content.json
+    python main.py content ...     # review / approve / confirm the ledger
+    python main.py publish         # send approved articles to their platforms
+
+Web UI and accounts:
     python main.py auth ...        # manage web UI accounts and 2FA enrolment
     python main.py ui              # launch the local web wizard
 """
@@ -21,8 +32,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from config_loader import Config, ConfigError
+from content_store import ContentStoreError
 from logging_setup import get_logger, setup_logging
-from models import CHANNELS, STATUSES, Sponsor, is_valid_email, now_iso
+from models import (
+    CHANNELS,
+    CONTENT_STATUSES,
+    PLATFORM_IDS,
+    STATUSES,
+    ContentItem,
+    Sponsor,
+    is_valid_email,
+    now_iso,
+    slugify,
+)
 from tracker import SponsorNotFound, SponsorTracker, TrackerError
 from webapp.auth import (
     MASTER_ENV,
@@ -462,6 +484,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    from publishers import check_all
     from senders import get_sender
 
     config = load_config(args)
@@ -469,8 +492,21 @@ def cmd_status(args: argparse.Namespace) -> int:
     summary = tracker.summary()
     described = config.describe()
 
+    content: Dict[str, Any] = {}
+    if config.publishing_enabled or config.bool("content.enabled", False):
+        try:
+            from promoter import build_store
+
+            store = build_store(config)
+            content = store.summary()
+        except Exception as exc:  # noqa: BLE001 - status must never fail on this
+            content = {"error": f"{type(exc).__name__}: {exc}"}
+
     if args.json:
-        emit_json({"config": described, "pipeline": summary})
+        payload = {"config": described, "pipeline": summary}
+        if content:
+            payload["content"] = content
+        emit_json(payload)
         return EXIT_OK
 
     rule("GenesysPluginSponsorBot")
@@ -483,6 +519,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"({described['smtp']}, password {'set' if described['smtp_password_set'] else 'MISSING'})")
     out(f"Forum        : {'enabled' if described['forum_enabled'] else 'disabled'} "
         f"({described['forum_mode']} mode)")
+    out(f"Content      : {'enabled' if described['content_enabled'] else 'disabled'} "
+        f"(targets: {', '.join(described['content_platforms']) or 'none'})")
     out()
 
     rule("Pipeline")
@@ -502,6 +540,26 @@ def cmd_status(args: argparse.Namespace) -> int:
     for channel, usage in summary["daily_usage"].items():
         out(f"  {channel:<6} {usage['used']:>3}/{usage['limit']:<3} used, {usage['remaining']:>3} remaining")
     out()
+
+    if content and "error" not in content:
+        rule("Content syndication")
+        by_status = content.get("by_status") or {}
+        for status in CONTENT_STATUSES:
+            out(f"  {status:<12} {by_status.get(status, 0):>4}")
+        out(f"  {'pending pairs':<12} {content.get('pending_targets', 0):>4}")
+        out(f"  {'live URLs':<12} {len(content.get('live_urls') or []):>4}")
+        out()
+        for platform, usage in (content.get("daily_usage") or {}).items():
+            if usage["limit"]:
+                out(f"  {platform:<12} {usage['used']:>3}/{usage['limit']:<3} used, "
+                    f"{usage['remaining']:>3} remaining")
+        not_ready = [entry for entry in check_all(config, dry_run=True) if not entry.get("ready")]
+        if not_ready:
+            out()
+            out("  Not ready:")
+            for entry in not_ready:
+                out(f"    {entry['platform']:<12} {entry.get('reason') or 'not ready'}")
+        out()
 
     rule("Next up")
     queue = tracker.next_batch(described["batch_size"])
@@ -607,6 +665,646 @@ def cmd_ui(args: argparse.Namespace) -> int:
         port=args.port,
         open_browser=not args.no_browser,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Content syndication
+# --------------------------------------------------------------------------- #
+
+
+def _selected_platforms(config: Config, raw: Optional[str]) -> List[str]:
+    """Resolve `--platform` into a validated id list ([] means all enabled)."""
+    if not raw:
+        return []
+    chosen: List[str] = []
+    for token in str(raw).replace(",", " ").split():
+        platform = token.strip().lower()
+        if platform not in PLATFORM_IDS:
+            log = get_logger("cli")
+            log.error(
+                "Unknown platform %r; expected a comma separated subset of: %s",
+                platform,
+                ", ".join(PLATFORM_IDS),
+            )
+            raise SystemExit(EXIT_USAGE)
+        if platform not in chosen:
+            chosen.append(platform)
+    return chosen
+
+
+def build_promoter(config: Config, args: argparse.Namespace):
+    """Compose a Promoter, including the optional external renderer."""
+    from promoter import Promoter, build_store
+
+    renderer = _renderer_for(config, getattr(args, "llm", False))
+    return Promoter(
+        config,
+        build_store(config),
+        dry_run=True if getattr(args, "dry_run", False) else None,
+        batch_size=getattr(args, "batch", None),
+        llm_renderer=renderer,
+    )
+
+
+def _renderer_for(config: Config, use_llm: bool):
+    """Shared LLM-renderer wiring for `draft` and `publish`."""
+    if not use_llm:
+        return None
+    from llm import LLMError, SubprocessLLM
+
+    command = config.list("scheduler.llm_command")
+    if not command:
+        raise ConfigError(
+            "--llm requested but scheduler.llm_command is empty. "
+            'Set it to a local CLI, e.g. ["ollama", "run", "llama3.1"].'
+        )
+    try:
+        renderer = SubprocessLLM(
+            command,
+            timeout=config.int("scheduler.llm_timeout_seconds", 120, minimum=5, maximum=900),
+        )
+    except LLMError as exc:
+        raise ConfigError(f"--llm requested but {exc}") from exc
+    if not renderer.exists():
+        raise ConfigError(f"--llm requested but {renderer.describe()!r} is not on PATH")
+    get_logger("cli").info("Using external renderer: %s", renderer.describe())
+    return renderer
+
+
+def cmd_platforms(args: argparse.Namespace) -> int:
+    """Readiness report for every syndication target. Never transmits."""
+    from publishers import check_all
+
+    config = load_config(args)
+    log = get_logger("cli")
+    wanted = _selected_platforms(config, args.platform)
+    report = check_all(config, dry_run=True, platforms=wanted or None)
+
+    probe: Dict[str, Any] = {}
+    if args.probe:
+        from publishers import get_publisher
+
+        publisher = get_publisher(args.probe, config, dry_run=True)
+        if hasattr(publisher, "discover_publications"):
+            probe = {"publications": publisher.discover_publications()}
+        elif hasattr(publisher, "fetch_identity"):
+            probe = {"identity": publisher.fetch_identity()}
+        else:
+            log.info("%s has nothing to probe", args.probe)
+
+    if args.json:
+        emit_json({"platforms": report, "enabled": config.platforms_enabled(), "probe": probe})
+        return EXIT_OK
+
+    rule("Syndication platforms")
+    out(f"{'':<12} {'KIND':<8} {'READY':<6} LABEL")
+    out("-" * 78)
+    for entry in report:
+        enabled = "yes" if entry.get("enabled") else "no"
+        ready = "yes" if entry.get("ready") else "no"
+        label = str(entry.get("label") or entry.get("platform"))
+        out(f"{entry['platform']:<12} {str(entry.get('kind') or '-'):<8} {ready:<6} {label}")
+        out(f"{'':<12} enabled={enabled} mode={entry.get('mode') or '-'}")
+        if entry.get("reason") and entry["reason"] != "ok":
+            out(f"{'':<12} -> {entry['reason']}")
+        if entry.get("legacy"):
+            out(f"{'':<12} !! legacy target, see the note below")
+        out()
+
+    enabled = config.platforms_enabled()
+    out(f"Enabled platforms : {', '.join(enabled) or '(none)'}")
+    out(f"Content enabled   : {'yes' if config.publishing_enabled else 'no'}")
+    out(f"Content ledger    : {config.path('paths.content_file', 'content.json')}")
+    out(f"Outbox directory  : {config.path('publishing.outbox_dir', 'content_outbox')}")
+
+    for entry in report:
+        if entry.get("notes"):
+            out()
+            out(f"{entry['platform']}: {entry['notes']}")
+        if entry.get("token_env") and not entry.get("token_set"):
+            out(f"  {entry['platform']}: set ${entry['token_env']} before publishing")
+        if entry.get("token_help"):
+            out(f"  get a credential at: {entry['token_help']}")
+
+    if probe:
+        rule("Probe")
+        out(json.dumps(probe, indent=2, default=str))
+
+    if not enabled:
+        out()
+        out("Nothing is enabled yet. Add to config.yaml, for example:")
+        out("  platforms:")
+        out("    devto:")
+        out("      enabled: true")
+        out("    devdojo:")
+        out("      enabled: true")
+        out("  content:")
+        out("    enabled: true")
+    return EXIT_OK
+
+
+def cmd_draft(args: argparse.Namespace) -> int:
+    """Compose an article and store it as a draft. Transmits nothing."""
+    from content_engine import content_data_from_config, generate, render_prompt
+    from content_store import ContentStore, ContentStoreError
+    from promoter import build_store
+
+    config = load_config(args)
+    log = get_logger("cli")
+    data = content_data_from_config(config)
+    store = build_store(config)
+
+    platforms = _selected_platforms(config, args.platform) or config.platforms_enabled()
+    if not platforms:
+        log.warning(
+            "No platforms enabled - the draft will be stored with no targets. "
+            "Run 'python main.py platforms' to see how to enable one."
+        )
+
+    if args.prompt:
+        out(
+            render_prompt(
+                data,
+                title=args.title or "",
+                topic=args.topic or "",
+                platform=platforms[0] if platforms else "",
+            )
+        )
+        return EXIT_OK
+
+    try:
+        if args.from_file:
+            stored = _import_markdown(store, args.from_file, platforms, log)
+        else:
+            renderer = _renderer_for(config, args.llm)
+            composed = generate(
+                data,
+                title=args.title or "",
+                topic=args.topic or "",
+                platform=platforms[0] if platforms else "",
+                llm_renderer=renderer,
+            )
+            item = ContentItem(
+                id=ContentStore.make_id(composed["title"], args.topic or ""),
+                title=composed["title"],
+                body_markdown=composed["body"],
+                summary=composed["summary"],
+                topic=args.topic or "",
+                platforms=platforms,
+                tags=[str(tag) for tag in (data.get("tags") or [])],
+                canonical_url=str(data.get("canonical_base_url") or ""),
+                status="draft",
+                source="composed",
+                words=int(composed.get("words") or 0),
+            )
+            item.fingerprint = item.compute_fingerprint()
+            stored, _created = store.add(item)
+            store.save()
+            renderer_label = composed.get("renderer") or "deterministic"
+    except (ContentStoreError, ConfigError) as exc:
+        log.error("%s", exc)
+        return EXIT_ERROR
+
+    problems = _gate_for_all(data, stored, platforms)
+    payload = {
+        "id": stored.id,
+        "title": stored.title,
+        "status": stored.status,
+        "words": stored.words,
+        "platforms": stored.platforms,
+        "tags": stored.tags,
+        "renderer": renderer_label,
+        "problems": problems,
+        "content_file": str(store.path),
+    }
+
+    if args.json:
+        emit_json(payload)
+        return EXIT_ERROR if problems else EXIT_OK
+
+    rule(f"Draft {stored.id}")
+    out(f"Title     : {stored.title}")
+    out(f"Status    : {stored.status} (approve it before publishing)")
+    out(f"Words     : {stored.words}")
+    out(f"Renderer  : {renderer_label}")
+    out(f"Targets   : {', '.join(stored.platforms) or '(none)'}")
+    out(f"Tags      : {', '.join(stored.tags) or '(none)'}")
+    out(f"Stored in : {store.path}")
+    out()
+    if args.show:
+        out(stored.body_markdown)
+        out()
+    if problems:
+        rule("Quality gate")
+        for problem in problems:
+            out(f"  - {problem}")
+        out()
+        out("Publishing will refuse this draft until the findings are fixed.")
+        out("Enrich plugin.features / content.angle, or render with --llm.")
+        out("To override, set publishing.enforce_quality_gate: false - and accept")
+        out("that thin or undisclosed posts get removed by community moderators.")
+        return EXIT_ERROR
+    if not args.show:
+        out(f"Preview with: python main.py content show {stored.id}")
+        out()
+    out(f"Approve it: python main.py content approve {stored.id} --yes")
+    return EXIT_OK
+
+
+def _gate_for_all(data: Dict[str, Any], item: ContentItem, platforms: Sequence[str]) -> List[str]:
+    """Union of the per-platform gate findings for one draft."""
+    from content_engine import validate
+
+    problems: List[str] = []
+    for platform in platforms or [""]:
+        found = validate(
+            data,
+            title=item.title,
+            body=item.body_markdown,
+            summary=item.summary,
+            platform=platform,
+        )
+        for problem in found:
+            text = f"[{platform or 'generic'}] {problem}" if platform else problem
+            if text not in problems:
+                problems.append(text)
+    return problems
+
+
+def _import_markdown(store, path: str, platforms: List[str], log) -> ContentItem:  # noqa: ANN001
+    """Load a hand-written markdown file as a draft and return the stored item."""
+    from content_store import ContentStore
+    from publishers.markdown_html import strip_front_matter
+
+    source = Path(path).expanduser()
+    try:
+        raw = source.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"cannot read {source}: {exc}") from exc
+    _front, body = strip_front_matter(raw)
+    body = body.strip()
+    if not body:
+        raise ConfigError(f"{source} has no body after stripping front matter")
+
+    title = ""
+    for line in body.splitlines():
+        if line.startswith("# "):
+            title = line[2:].strip()
+            body = body.split("\n", 1)[1] if "\n" in body else ""
+            break
+    if not title:
+        title = source.stem.replace("-", " ").replace("_", " ").strip()
+
+    item = ContentItem(
+        id=ContentStore.make_id(title),
+        title=title,
+        body_markdown=body.strip(),
+        topic=source.stem,
+        platforms=platforms,
+        status="draft",
+        source="imported",
+        words=len(body.split()),
+    )
+    item.fingerprint = item.compute_fingerprint()
+    stored, _created = store.add(item)
+    store.save()
+    log.info("Imported %s as content item %s", source, stored.id)
+    return stored
+
+
+def cmd_publish(args: argparse.Namespace) -> int:
+    """Publish approved articles to their platforms."""
+    config = load_config(args)
+    log = get_logger("cli")
+
+    if not config.publishing_enabled:
+        log.error(
+            "Content syndication is off. Set content.enabled: true and at least one "
+            "platforms.<id>.enabled: true (see 'python main.py platforms')."
+        )
+        return EXIT_USAGE
+
+    try:
+        promoter = build_promoter(config, args)
+    except ConfigError as exc:
+        log.error("%s", exc)
+        return EXIT_USAGE
+
+    platforms = _selected_platforms(config, args.platform)
+    unknown = [pid for pid in platforms if pid not in config.platforms_enabled()]
+    for platform in unknown:
+        log.warning("platforms.%s.enabled is false - it will be skipped", platform)
+
+    if args.dry_run:
+        log.warning("DRY RUN: articles are shaped and checked, nothing is transmitted")
+
+    out(f"Content    : {config.path('paths.content_file', 'content.json')}")
+    out(f"Mode       : {'DRY RUN' if promoter.dry_run else 'LIVE'}")
+    out(f"Platforms  : {', '.join(platforms or promoter.platforms) or '(none)'}")
+    out(f"Batch      : {promoter.batch_size}")
+    out(f"Usage today: {promoter.store.daily_usage()}")
+    out()
+
+    if args.once:
+        result = promoter.tick(
+            platforms=platforms or None,
+            item_ids=[args.id] if args.id else None,
+        )
+        promoter.store.save()
+        out()
+        rule("Publish tick")
+        out(
+            f"attempted={result.attempted} published={result.published} "
+            f"drafted={result.drafted} queued={result.queued} "
+            f"failed={result.failed} skipped={result.skipped}"
+        )
+        for record in result.records:
+            flag = "OK " if record.ok else "ERR"
+            state = record.url or record.detail
+            out(f"  [{flag}] {record.item_id:<26} {record.platform:<12} {record.words:>4}w  {state}")
+        for note in result.notes:
+            out(f"  note: {note}")
+        if result.queued:
+            out()
+            from content_engine import approve_hint
+
+            out(approve_hint())
+        if args.json:
+            out()
+            out(json.dumps(result.to_dict(), indent=2, default=str))
+        return EXIT_OK if result.failed == 0 else EXIT_ERROR
+
+    results = promoter.run_forever(
+        interval=args.interval, max_ticks=args.max_ticks, platforms=platforms or None
+    )
+    promoter.store.save()
+    total = sum(record.ok for result in results for record in result.records)
+    out(f"Published {total} article/platform pair(s) across {len(results)} tick(s)")
+    return EXIT_OK
+
+
+def cmd_content(args: argparse.Namespace) -> int:
+    """Review and curate the content ledger."""
+    handler = CONTENT_COMMANDS.get(args.content_command)
+    if handler is None:
+        print(f"Unknown content command: {args.content_command}")
+        return EXIT_USAGE
+    return handler(args)
+
+
+def content_store_for(args: argparse.Namespace):
+    """Load the config and the campaign's ContentStore."""
+    from promoter import build_store
+
+    config = load_config(args)
+    return config, build_store(config)
+
+
+def content_list(args: argparse.Namespace) -> int:
+    config, store = content_store_for(args)
+    items = store.all(statuses=[args.status] if args.status else None, platform=args.platform)
+    summary = store.summary()
+
+    if args.json:
+        emit_json(
+            {
+                "items": [item.to_dict() for item in items],
+                "summary": summary,
+                "content_file": str(store.path),
+            }
+        )
+        return EXIT_OK
+
+    rule(f"{len(items)} article(s)")
+    if not items:
+        out("Nothing drafted yet. Try: python main.py draft --topic \"...\"")
+        out(f"Ledger: {store.path}")
+        return EXIT_OK
+
+    for item in items:
+        out()
+        out(f"  {item.id}  [{item.status}]  {item.words}w")
+        out(f"    title      {item.title}")
+        out(f"    targets    {', '.join(item.platforms) or '(none)'}")
+        for platform in item.platforms:
+            entry = item.publications.get(platform)
+            if entry is None:
+                out(f"      {platform:<12} pending")
+            else:
+                suffix = entry.url or entry.detail or entry.last_error or ""
+                out(f"      {platform:<12} {entry.status:<8} {suffix}")
+        if item.last_error:
+            out(f"    last error {item.last_error}")
+
+    out()
+    rule("Content summary")
+    for status, count in summary["by_status"].items():
+        out(f"  {status:<12} {count:>4}")
+    out(f"  {'pending pairs':<12} {summary['pending_targets']:>4}")
+    if summary["live_urls"]:
+        out()
+        rule("Live URLs")
+        for url in summary["live_urls"]:
+            out(f"  {url}")
+    out()
+    rule("Rate limits today")
+    for platform, usage in summary["daily_usage"].items():
+        out(f"  {platform:<12} {usage['used']:>3}/{usage['limit']:<3} used, {usage['remaining']:>3} left")
+    return EXIT_OK
+
+
+def content_show(args: argparse.Namespace) -> int:
+    from content_engine import content_data_from_config, prepare_for_platform
+
+    config, store = content_store_for(args)
+    item = store.require(args.id)
+    if args.json:
+        emit_json(item.to_dict())
+        return EXIT_OK
+
+    rule(f"{item.id}  [{item.status}]")
+    out(f"Title   : {item.title}")
+    out(f"Topic   : {item.topic or '-'}")
+    out(f"Words   : {item.words}")
+    out(f"Targets : {', '.join(item.platforms)}")
+    out(f"Tags    : {', '.join(item.tags) or '-'}")
+    out(f"Source  : {item.source}")
+    if item.canonical_url:
+        out(f"Canonical: {item.canonical_url}")
+    out()
+    out(item.body_markdown)
+    out()
+    rule("Per-platform shaping")
+    data = content_data_from_config(config)
+    for platform in item.platforms:
+        payload = prepare_for_platform(
+            data,
+            title=item.title,
+            body=item.body_markdown,
+            summary=item.summary,
+            tags=item.tags,
+            platform=platform,
+        )
+        verdict = "publishable" if payload["publishable"] else "BLOCKED"
+        out(f"  {platform:<12} {verdict:<12} {payload['words']}w  tags={','.join(payload['tags']) or '-'}")
+        for problem in payload["problems"]:
+            out(f"      - {problem}")
+    return EXIT_OK
+
+
+def content_add(args: argparse.Namespace) -> int:
+
+    config, store = content_store_for(args)
+    platforms = _selected_platforms(config, args.platform) or config.platforms_enabled()
+    if not platforms:
+        get_logger("cli").warning("no platforms enabled - the article will have no targets")
+
+    try:
+        if args.from_file:
+            stored = _import_markdown(store, args.from_file, platforms, get_logger("cli"))
+            created = True
+        else:
+            body = args.body
+            if args.body_file:
+                body = Path(args.body_file).expanduser().read_text(encoding="utf-8")
+            if not body or not body.strip():
+                print("Provide --body or --body-file.")
+                return EXIT_USAGE
+            item = ContentItem(
+                id=slugify(args.id or args.title),
+                title=args.title,
+                body_markdown=body.strip(),
+                summary=args.summary or "",
+                topic=args.topic or "",
+                platforms=platforms,
+                tags=[tag.strip() for tag in (args.tags or "").split(",") if tag.strip()],
+                status="draft",
+                source="manual",
+                words=len(body.split()),
+            )
+            item.fingerprint = item.compute_fingerprint()
+            stored, created = store.add(item)
+            store.save()
+    except (ContentStoreError, ConfigError, OSError) as exc:
+        print(f"Could not add the article: {exc}")
+        return EXIT_ERROR
+
+    print(("Added " if created else "Updated ") + stored.summary_line())
+    print(f"Approve it with: python main.py content approve {stored.id} --yes")
+    return EXIT_OK
+
+
+def content_approve(args: argparse.Namespace) -> int:
+    _config, store = content_store_for(args)
+    item = store.approve(args.id)
+    if args.yes or sys.stdin.isatty():
+        if not args.yes:
+            answer = input(f"Approve and publish '{item.title}'? [y/N]: ").strip().lower()
+            if answer not in {"y", "yes"}:
+                print("Cancelled.")
+                return EXIT_OK
+    else:
+        print("Refusing to approve in a non-interactive session without --yes")
+        return EXIT_USAGE
+    store.save()
+    pending = item.pending_platforms()
+    print(f"{item.id} -> approved")
+    print(f"Pending targets: {', '.join(pending) or '(none)'}")
+    if pending:
+        print("Publish with: python main.py publish --once --dry-run")
+    return EXIT_OK
+
+
+def content_mark(args: argparse.Namespace) -> int:
+    from content_store import ContentNotFound, ContentStoreError
+
+    _config, store = content_store_for(args)
+    try:
+        item = store.update_status(args.id, args.status, note=args.note or "")
+    except ContentNotFound:
+        print(f"Article {args.id!r} is not in the ledger")
+        return EXIT_ERROR
+    except ContentStoreError as exc:
+        print(f"{exc}")
+        return EXIT_USAGE
+    store.save()
+    print(f"{item.id} -> {item.status}")
+    return EXIT_OK
+
+
+def content_confirm(args: argparse.Namespace) -> int:
+    from content_store import ContentNotFound, ContentStoreError
+
+    _config, store = content_store_for(args)
+    try:
+        item = store.confirm(args.id, args.platform, url=args.url or "")
+    except ContentNotFound:
+        print(f"Article {args.id!r} is not in the ledger")
+        return EXIT_ERROR
+    except ContentStoreError as exc:
+        print(f"{exc}")
+        return EXIT_USAGE
+    store.save()
+    entry = item.publication(args.platform)
+    print(f"Confirmed {item.id} on {args.platform}")
+    print(f"  {entry.status}  {entry.url}")
+    if item.status == "published":
+        print("Every target is live - this article is fully syndicated.")
+    else:
+        remaining = item.pending_platforms()
+        print(f"Still pending: {', '.join(remaining) or '(none)'}")
+    return EXIT_OK
+
+
+def content_reset(args: argparse.Namespace) -> int:
+    from content_store import ContentNotFound, ContentStoreError
+
+    _config, store = content_store_for(args)
+    try:
+        item = store.unconfirm(args.id, args.platform)
+    except ContentNotFound:
+        print(f"Article {args.id!r} is not in the ledger")
+        return EXIT_ERROR
+    except ContentStoreError as exc:
+        print(f"{exc}")
+        return EXIT_USAGE
+    store.save()
+    print(f"Reset {item.id} on {args.platform} - it will be offered again")
+    return EXIT_OK
+
+
+def content_remove(args: argparse.Namespace) -> int:
+    from content_store import ContentNotFound
+
+    _config, store = content_store_for(args)
+    try:
+        item = store.require(args.id)
+    except ContentNotFound:
+        print(f"Article {args.id!r} is not in the ledger")
+        return EXIT_ERROR
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("Refusing to remove without --yes in a non-interactive session")
+            return EXIT_USAGE
+        if input(f"Remove {item.id} ({item.status})? [y/N]: ").strip().lower() not in {"y", "yes"}:
+            print("Cancelled")
+            return EXIT_OK
+    store.remove(args.id)
+    store.save()
+    print(f"Removed {item.id}")
+    return EXIT_OK
+
+
+CONTENT_COMMANDS = {
+    "list": content_list,
+    "show": content_show,
+    "add": content_add,
+    "approve": content_approve,
+    "mark": content_mark,
+    "confirm": content_confirm,
+    "reset": content_reset,
+    "remove": content_remove,
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -794,17 +1492,137 @@ AUTH_COMMANDS = {
 # --------------------------------------------------------------------------- #
 
 
+PLATFORM_HELP = "comma separated subset of: " + ", ".join(PLATFORM_IDS)
+
+
+def _add_content_parsers(sub: Any) -> None:
+    """Register the content-syndication command group.
+
+    Kept out of `build_parser` so the tree stays readable and so adding a
+    platform id in `models.py` propagates to the help text automatically.
+    """
+    p_platforms = sub.add_parser(
+        "platforms",
+        help="syndication targets: what is configured and whether it is ready",
+    )
+    p_platforms.add_argument("--platform", help=PLATFORM_HELP)
+    p_platforms.add_argument(
+        "--probe",
+        choices=list(PLATFORM_IDS),
+        help="call a read-only endpoint to discover ids (e.g. hashnode publications)",
+    )
+    p_platforms.add_argument("--json", action="store_true")
+    p_platforms.set_defaults(func=cmd_platforms)
+
+    p_draft = sub.add_parser(
+        "draft", help="compose an article into content.json (transmits nothing)"
+    )
+    p_draft.add_argument("--title", help="article title (default: derived from config)")
+    p_draft.add_argument("--topic", help="narrow the article to one angle or topic")
+    p_draft.add_argument("--platform", help=f"targets to attach (default: enabled ones). {PLATFORM_HELP}")
+    p_draft.add_argument("--from-file", help="import a hand-written markdown file instead")
+    p_draft.add_argument("--show", action="store_true", help="print the article body")
+    p_draft.add_argument("--prompt", action="store_true", help="print the LLM prompt and exit")
+    p_draft.add_argument("--llm", action="store_true", help="render via scheduler.llm_command")
+    p_draft.add_argument("--json", action="store_true")
+    p_draft.set_defaults(func=cmd_draft)
+
+    p_pub = sub.add_parser(
+        "publish", help="publish approved articles to their target platforms"
+    )
+    p_pub.add_argument("--once", action="store_true", help="run a single tick and exit")
+    p_pub.add_argument("--dry-run", action="store_true", help="shape and check, transmit nothing")
+    p_pub.add_argument("--platform", help=f"restrict to these targets. {PLATFORM_HELP}")
+    p_pub.add_argument("--id", help="publish only this content item")
+    p_pub.add_argument("--batch", type=int, help="(article, platform) pairs per tick")
+    p_pub.add_argument("--interval", type=int, help="seconds between ticks (default: from config)")
+    p_pub.add_argument("--max-ticks", type=int, help="stop after N ticks (testing)")
+    p_pub.add_argument("--llm", action="store_true", help="render via scheduler.llm_command")
+    p_pub.add_argument("--json", action="store_true", help="JSON tick result with --once")
+    p_pub.set_defaults(func=cmd_publish)
+
+    p_content = sub.add_parser("content", help="review and curate the content ledger")
+    content_sub = p_content.add_subparsers(dest="content_command", metavar="SUBCOMMAND")
+
+    c_list = content_sub.add_parser("list", help="every article and its publication ledger")
+    c_list.add_argument("--status", choices=CONTENT_STATUSES)
+    c_list.add_argument("--platform", choices=list(PLATFORM_IDS))
+    c_list.add_argument("--json", action="store_true")
+    c_list.set_defaults(func=content_list)
+
+    c_show = content_sub.add_parser("show", help="print one article and its per-platform shaping")
+    c_show.add_argument("id")
+    c_show.add_argument("--json", action="store_true")
+    c_show.set_defaults(func=content_show)
+
+    c_add = content_sub.add_parser("add", help="add or replace an article by hand")
+    c_add.add_argument("--title", required=True)
+    c_add.add_argument("--id", help="stable id (default: derived from the title)")
+    c_add.add_argument("--body", help="markdown body")
+    c_add.add_argument("--body-file", help="read the markdown body from this file")
+    c_add.add_argument("--summary")
+    c_add.add_argument("--topic")
+    c_add.add_argument("--tags", help="comma separated")
+    c_add.add_argument("--platform", help=PLATFORM_HELP)
+    c_add.add_argument("--from-file", help="import a markdown file (title taken from its H1)")
+    c_add.set_defaults(func=content_add)
+
+    c_approve = content_sub.add_parser("approve", help="approve a draft for publishing")
+    c_approve.add_argument("id")
+    c_approve.add_argument("--yes", action="store_true", help="do not prompt")
+    c_approve.set_defaults(func=content_approve)
+
+    c_mark = content_sub.add_parser("mark", help="change an article's status")
+    c_mark.add_argument("id")
+    c_mark.add_argument("--status", required=True, choices=CONTENT_STATUSES)
+    c_mark.add_argument("--note")
+    c_mark.set_defaults(func=content_mark)
+
+    c_confirm = content_sub.add_parser(
+        "confirm", help="record the live URL for a manually submitted article"
+    )
+    c_confirm.add_argument("id")
+    c_confirm.add_argument("--platform", required=True, choices=list(PLATFORM_IDS))
+    c_confirm.add_argument("--url", required=True, help="the published http(s) URL")
+    c_confirm.set_defaults(func=content_confirm)
+
+    c_reset = content_sub.add_parser(
+        "reset", help="clear a publication so the pair is offered again"
+    )
+    c_reset.add_argument("id")
+    c_reset.add_argument("--platform", required=True, choices=list(PLATFORM_IDS))
+    c_reset.set_defaults(func=content_reset)
+
+    c_remove = content_sub.add_parser("remove", help="delete an article from the ledger")
+    c_remove.add_argument("id")
+    c_remove.add_argument("--yes", action="store_true")
+    c_remove.set_defaults(func=content_remove)
+
+    p_content.set_defaults(func=cmd_content)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main.py",
-        description="Promote an open-source Genesys Cloud plugin to potential sponsors.",
+        description=(
+            "Promote an open-source project two ways: targeted sponsor outreach, "
+            "and content syndication to developer communities."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Examples:\n"
+            "Outreach examples:\n"
             "  python main.py discover --yes --channel email\n"
             "  python main.py add-sponsor --name 'Acme ISV' --email devrel@acme.com\n"
             "  python main.py generate --sponsor Acme --channel forum\n"
             "  python main.py run --once --dry-run\n"
+            "\n"
+            "Content syndication examples:\n"
+            "  python main.py platforms\n"
+            "  python main.py draft --topic 'retry policies for contact-centre APIs'\n"
+            "  python main.py content approve <id> --yes\n"
+            "  python main.py publish --once --dry-run\n"
+            "  python main.py content confirm <id> --platform devdojo --url <url>\n"
+            "\n"
             "  python main.py status\n"
             "  python main.py ui\n"
         ),
@@ -896,6 +1714,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ui.add_argument("--base-dir", help="directory holding config.yaml and profiles/ (default: project root)")
     p_ui.set_defaults(func=cmd_ui)
 
+    _add_content_parsers(sub)
+
     # auth
     p_auth = sub.add_parser("auth", help="manage web UI accounts and two-factor enrolment")
     p_auth.add_argument("--base-dir", help="directory holding users.json (default: cwd)")
@@ -947,10 +1767,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     except TrackerError as exc:
         log.error("%s", exc)
         return EXIT_ERROR
+    except ContentStoreError as exc:
+        log.error("%s", exc)
+        return EXIT_ERROR
     except KeyboardInterrupt:
         log.info("Interrupted")
         return EXIT_ERROR
-    except SystemExit as exc:  # dependency guard
+    except SystemExit as exc:  # dependency guard, and CLI-level bail-outs
         return int(exc.code or EXIT_ERROR)
     except Exception as exc:  # noqa: BLE001 - last-resort guard
         log.exception("Unhandled error: %s", exc)

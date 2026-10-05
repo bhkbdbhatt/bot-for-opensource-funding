@@ -14,7 +14,16 @@ except ImportError as exc:  # pragma: no cover
         "PyYAML is required. Run: pip install -r requirements.txt"
     ) from exc
 
-from models import CHANNELS, CHANNEL_EMAIL, CHANNEL_FORUM, STATUSES, is_valid_url
+from models import (
+    CHANNELS,
+    CHANNEL_EMAIL,
+    CHANNEL_FORUM,
+    CONTENT_STATUSES,
+    PLATFORM_IDS,
+    STATUSES,
+    is_valid_url,
+)
+from platforms import PLATFORMS
 
 CONFIG_FILENAME = "config.yaml"
 EXAMPLE_FILENAME = "config.example.yaml"
@@ -156,12 +165,16 @@ class Config:
         return copy.deepcopy(self._data)
 
     def section(self, name: str) -> Dict[str, Any]:
-        value = self._data.get(name)
+        """A mapping section. Accepts a dotted path (``rate_limits.platform_daily_limits``)."""
+        value = self.get(name)
         return value if isinstance(value, dict) else {}
 
     def records(self, name: str) -> List[Dict[str, Any]]:
-        """A list-of-mappings section (e.g. `sponsors`), skipping junk entries."""
-        value = self._data.get(name)
+        """A list-of-mappings section (e.g. `sponsors`), skipping junk entries.
+
+        Accepts a dotted path for the same reason `section()` does.
+        """
+        value = self.get(name)
         if not isinstance(value, list):
             return []
         return [item for item in value if isinstance(item, dict)]
@@ -295,6 +308,9 @@ class Config:
             if self.int("rate_limits.max_forum_posts_per_day", 3, maximum=100000) < 1:
                 errors.append("rate_limits.max_forum_posts_per_day must be >= 1")
 
+        self._validate_content(errors, warnings)
+        self._validate_platforms(errors, warnings)
+
         scheduler = self.section("scheduler")
         if scheduler:
             if self.int("scheduler.interval_seconds", 7200, minimum=1) < 1:
@@ -305,6 +321,15 @@ class Config:
                 if any(char in token for char in "\r\n"):
                     errors.append(f"scheduler.llm_command[{index}] must not contain newlines")
 
+        publishing = self.section("publishing")
+        if publishing:
+            if self.int("publishing.interval_seconds", 10800, minimum=60) < 60:
+                errors.append("publishing.interval_seconds must be >= 60")
+            if self.int("publishing.batch_size", 3, minimum=1, maximum=50) < 1:
+                errors.append("publishing.batch_size must be between 1 and 50")
+            if self.float("publishing.request_delay_seconds", 2.0) < 0:
+                errors.append("publishing.request_delay_seconds must be >= 0")
+
         if not (self.section("email") or self.section("forum")):
             errors.append("at least one channel (email or forum) must be configured")
 
@@ -312,6 +337,110 @@ class Config:
         if errors:
             joined = "\n".join(f"  - {message}" for message in errors)
             raise ConfigError(f"{self.file_path}: invalid configuration:\n{joined}")
+
+    def _validate_content(self, errors: List[str], warnings: List[str]) -> None:
+        """Validate the optional `content` section.
+
+        Everything here is optional. A config with no `content` block still
+        validates, because outreach is a complete use on its own and profiles
+        written before this feature existed must keep working.
+        """
+        content = self.section("content")
+        if not content:
+            return
+        if self.bool("content.enabled", False) and not self.platforms_enabled():
+            warnings.append(
+                "content.enabled is true but no platform is enabled - set "
+                "platforms.<id>.enabled: true (see 'python main.py platforms')"
+            )
+        defaults = _as_list(content.get("default_platforms"))
+        for index, platform in enumerate(defaults):
+            if platform not in PLATFORM_IDS:
+                errors.append(
+                    f"content.default_platforms[{index}] must be one of "
+                    f"{', '.join(PLATFORM_IDS)} (got {platform!r})"
+                )
+        if self.int("content.min_words", 350, maximum=50000) < 0:
+            errors.append("content.min_words must be >= 0")
+        max_words = self.int("content.max_words", 1800, minimum=50, maximum=100000)
+        min_words = self.int("content.min_words", 350, maximum=50000)
+        if min_words and max_words and min_words > max_words:
+            errors.append("content.min_words must not exceed content.max_words")
+        for index, topic in enumerate(self.records("content.topics")):
+            if not _as_str(topic.get("title")):
+                errors.append(f"content.topics[{index}].title is required")
+            for jindex, platform in enumerate(_as_list(topic.get("platforms"))):
+                if platform not in PLATFORM_IDS:
+                    errors.append(
+                        f"content.topics[{index}].platforms[{jindex}] must be one of "
+                        f"{', '.join(PLATFORM_IDS)} (got {platform!r})"
+                    )
+
+    def _validate_platforms(self, errors: List[str], warnings: List[str]) -> None:
+        """Validate the optional `platforms` block.
+
+        Only keys that are actually present are checked, and unknown platform ids
+        are an error rather than a silent no-op - a typo in a platform name would
+        otherwise look like a successful configuration that never publishes.
+        """
+        section = self.section("platforms")
+        if not section:
+            return
+        for platform_id, block in section.items():
+            if platform_id not in PLATFORM_IDS:
+                errors.append(
+                    f"platforms.{platform_id} is not a known platform; "
+                    f"expected one of {', '.join(PLATFORM_IDS)}"
+                )
+                continue
+            if not isinstance(block, dict):
+                errors.append(f"platforms.{platform_id} must be a mapping")
+                continue
+            spec = PLATFORMS[platform_id]
+            if spec.legacy and _as_bool(block.get("enabled"), False):
+                warnings.append(
+                    f"platforms.{platform_id}.enabled is true, but this platform is legacy: "
+                    f"{spec.notes}"
+                )
+            for url_key in ("api_base", "submit_url", "guidelines_url", "site_url", "url"):
+                value = _as_str(block.get(url_key))
+                if value and not is_valid_url(value):
+                    errors.append(
+                        f"platforms.{platform_id}.{url_key} must be an http(s) URL (got {value!r})"
+                    )
+            for key in ("api_key_env", "token_env", "oauth_env", "username", "password_env"):
+                value = _as_str(block.get(key))
+                if any(char in value for char in "\r\n"):
+                    errors.append(f"platforms.{platform_id}.{key} must not contain newlines")
+            if not _as_bool(block.get("enabled"), False):
+                continue
+            if spec.kind == "api" and not self._platform_credentials_present(platform_id, block):
+                key_env = _as_str(block.get("api_key_env")) or _as_str(
+                    block.get("token_env")
+                ) or _as_str(block.get("oauth_env")) or spec.token_env
+                warnings.append(
+                    f"platforms.{platform_id} is enabled but environment variable "
+                    f"{key_env or '(unnamed)'} is not set - publishing will be refused until it is"
+                )
+
+    def _platform_credentials_present(self, platform_id: str, block: Dict[str, Any]) -> bool:
+        """Does any of this platform's credential indirections resolve to a value?"""
+        candidates = (
+            _as_str(block.get("api_key_env")),
+            _as_str(block.get("token_env")),
+            _as_str(block.get("oauth_env")),
+            _as_str(block.get("password_env")),
+            PLATFORMS[platform_id].token_env,
+        )
+        return any(resolve_secret(name) for name in candidates if name)
+
+    def platforms_enabled(self) -> List[str]:
+        """Platform ids with `enabled: true`, in registry order."""
+        return [
+            platform
+            for platform in PLATFORM_IDS
+            if self.bool(f"platforms.{platform}.enabled", False)
+        ]
 
     # -- derived helpers --------------------------------------------------- #
 
@@ -330,6 +459,21 @@ class Config:
             CHANNEL_EMAIL: self.int("rate_limits.max_emails_per_day", 15, maximum=100000),
             CHANNEL_FORUM: self.int("rate_limits.max_forum_posts_per_day", 3, maximum=100000),
         }
+
+    @property
+    def content_statuses(self) -> List[str]:
+        """Accepted `content` pipeline statuses, for the CLI and the UI."""
+        return list(CONTENT_STATUSES)
+
+    @property
+    def publishing_enabled(self) -> bool:
+        """Is content syndication switched on for this campaign?
+
+        Requires both halves: the `content.enabled` switch and at least one
+        enabled platform. Either alone is a no-op, so this is the single
+        predicate the CLI, the UI and the promoter all ask.
+        """
+        return self.bool("content.enabled", False) and bool(self.platforms_enabled())
 
     @property
     def plugin(self) -> Dict[str, Any]:
@@ -355,4 +499,12 @@ class Config:
             "batch_size": self.int("scheduler.batch_size", 5, maximum=100),
             "interval_seconds": self.int("scheduler.interval_seconds", 7200, minimum=1),
             "dry_run": self.bool("scheduler.dry_run", False),
+            "content_enabled": self.publishing_enabled,
+            "content_dry_run": self.bool("publishing.dry_run", False),
+            "content_platforms": self.platforms_enabled(),
+            "content_batch_size": self.int("publishing.batch_size", 3, minimum=1, maximum=50),
+            "content_interval_seconds": self.int(
+                "publishing.interval_seconds", 10800, minimum=60
+            ),
+            "content_enforce_gate": self.bool("publishing.enforce_quality_gate", True),
         }

@@ -10,7 +10,10 @@ bot.log.*
 sponsors.json
 sponsors.json.corrupt
 discovered.json
+content.json
+content.json.corrupt
 forum_outbox/
+content_outbox/
 users.json
 users.json.*
 

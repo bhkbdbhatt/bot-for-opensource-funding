@@ -35,8 +35,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Pattern, Tuple
 
 from config_loader import ConfigError
+from content_store import ContentNotFound, ContentStoreError
 from logging_setup import get_logger, setup_logging
-from models import CHANNELS, STATUSES
+from models import CHANNELS, CONTENT_STATUSES, PLATFORM_IDS, STATUSES
 from tracker import TrackerError
 from webapp import auth
 from webapp.auth import AuthError
@@ -46,7 +47,7 @@ from webapp.jobs import JobManager
 from webapp.profiles import ProfileStore, preset_catalog
 
 LOG = get_logger("webapp")
-VERSION = "1.1.0"
+VERSION = "2.0.0"
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 _MAX_BODY = 1_000_000
@@ -148,6 +149,19 @@ def make_handler(app: App) -> type:
             except ConfigError as exc:
                 self._send_json({"error": str(exc)}, 400)
             except TrackerError as exc:
+                self._send_json({"error": str(exc)}, 400)
+            except ContentNotFound as exc:
+                self._send_json({"error": str(exc)}, 404)
+            except ContentStoreError as exc:
+                self._send_json({"error": str(exc)}, 400)
+            except LookupError as exc:
+                # `webapp.service` raises LookupError for a missing entity when the
+                # domain type has not been translated further up.
+                self._send_json({"error": str(exc)}, 404)
+            except ValueError as exc:
+                # Input validation failures from the service layer (empty body,
+                # malformed URL, syndication switched off). A 400 with the
+                # message is more useful to the operator than a 500.
                 self._send_json({"error": str(exc)}, 400)
             except (BrokenPipeError, ConnectionResetError):  # pragma: no cover
                 pass
@@ -484,18 +498,31 @@ def _auth_totp_disable(handler, **_):
 
 def _bootstrap(handler, **_):
     app = handler.app
+    from platforms import catalog
+
     return {
         "version": VERSION,
         "presets": preset_catalog(),
         "profiles": [profile.describe() for profile in app.profiles.list()],
         "channels": list(CHANNELS),
         "statuses": list(STATUSES),
+        "content_statuses": list(CONTENT_STATUSES),
+        "platform_ids": list(PLATFORM_IDS),
+        "platforms": catalog(),
         "github": service.github_status(),
     }
 
 
 def _presets(handler, **_):
-    return {"presets": preset_catalog(), "channels": list(CHANNELS), "statuses": list(STATUSES)}
+    from platforms import catalog
+
+    return {
+        "presets": preset_catalog(),
+        "channels": list(CHANNELS),
+        "statuses": list(STATUSES),
+        "content_statuses": list(CONTENT_STATUSES),
+        "platforms": catalog(),
+    }
 
 
 def _profiles_list(handler, **_):
@@ -705,6 +732,170 @@ def _profile_secrets(handler, pid: str, **_):
     )
 
 
+# --------------------------------------------------------------------------- #
+# Content syndication
+# --------------------------------------------------------------------------- #
+
+
+def _profile_content(handler, pid: str, **_):
+    app = handler.app
+    app.require_profile(pid)
+    config = app.profiles.load_config(pid)
+    return service.content_summary(config)
+
+
+def _profile_content_item(handler, pid: str, item_id: str, **_):
+    app = handler.app
+    app.require_profile(pid)
+    config = app.profiles.load_config(pid)
+    return service.show_article(config, item_id)
+
+
+def _profile_content_draft(handler, pid: str, **_):
+    app = handler.app
+    app.require_profile(pid)
+    body = handler._read_json()
+    config = app.profiles.load_config(pid)
+    platforms = body.get("platforms")
+    if isinstance(platforms, str):
+        platforms = [part.strip() for part in platforms.split(",") if part.strip()]
+    return service.draft_article(
+        config,
+        title=str(body.get("title") or ""),
+        topic=str(body.get("topic") or ""),
+        platforms=[str(item) for item in platforms] if platforms else None,
+        use_llm=bool(body.get("llm")),
+        approve=bool(body.get("approve")),
+    )
+
+
+def _profile_content_update(handler, pid: str, item_id: str, **_):
+    app = handler.app
+    app.require_profile(pid)
+    body = handler._read_json()
+    config = app.profiles.load_config(pid)
+    return service.update_article(
+        config, item_id, str(body.get("body") or ""), title=str(body.get("title") or "")
+    )
+
+
+def _profile_content_mark(handler, pid: str, **_):
+    app = handler.app
+    app.require_profile(pid)
+    body = handler._read_json()
+    item_id = str(body.get("id") or "").strip()
+    status_value = str(body.get("status") or "").strip().lower()
+    if not item_id or not status_value:
+        raise ApiError("both 'id' and 'status' are required")
+    config = app.profiles.load_config(pid)
+    return service.mark_article(config, item_id, status_value)
+
+
+def _profile_content_approve(handler, pid: str, **_):
+    app = handler.app
+    app.require_profile(pid)
+    body = handler._read_json()
+    item_id = str(body.get("id") or "").strip()
+    if not item_id:
+        raise ApiError("'id' is required")
+    config = app.profiles.load_config(pid)
+    return service.approve_article(config, item_id)
+
+
+def _profile_content_confirm(handler, pid: str, **_):
+    app = handler.app
+    app.require_profile(pid)
+    body = handler._read_json()
+    item_id = str(body.get("id") or "").strip()
+    platform = str(body.get("platform") or "").strip().lower()
+    url = str(body.get("url") or "").strip()
+    if not item_id or not platform or not url:
+        raise ApiError("'id', 'platform' and 'url' are all required")
+    config = app.profiles.load_config(pid)
+    return service.confirm_article(config, item_id, platform, url)
+
+
+def _profile_content_reset(handler, pid: str, **_):
+    app = handler.app
+    app.require_profile(pid)
+    body = handler._read_json()
+    item_id = str(body.get("id") or "").strip()
+    platform = str(body.get("platform") or "").strip().lower()
+    if not item_id or not platform:
+        raise ApiError("both 'id' and 'platform' are required")
+    config = app.profiles.load_config(pid)
+    return service.reset_article(config, item_id, platform)
+
+
+def _profile_content_remove(handler, pid: str, **_):
+    app = handler.app
+    app.require_profile(pid)
+    body = handler._read_json()
+    item_id = str(body.get("id") or "").strip()
+    if not item_id:
+        raise ApiError("'id' is required")
+    config = app.profiles.load_config(pid)
+    return service.remove_article(config, item_id)
+
+
+def _profile_content_publish(handler, pid: str, **_):
+    app = handler.app
+    app.require_profile(pid)
+    body = handler._read_json()
+    config = app.profiles.load_config(pid)
+    item_ids = body.get("ids")
+    if item_ids is not None and not isinstance(item_ids, list):
+        raise ApiError("'ids' must be a list of content item ids")
+    platforms = body.get("platforms")
+    if platforms is not None and not isinstance(platforms, list):
+        raise ApiError("'platforms' must be a list of platform ids")
+    dry_run = body.get("dry_run")
+    dry_run = True if dry_run is None else bool(dry_run)
+
+    def work(ctx):
+        return service.publish_content(
+            config,
+            ctx,
+            item_ids=[str(item) for item in item_ids] if item_ids else None,
+            platforms=[str(item).strip().lower() for item in platforms] if platforms else None,
+            dry_run=dry_run,
+            batch=int(body["batch"]) if body.get("batch") else None,
+        )
+
+    label = f"{'Dry run' if dry_run else 'Publish'} ({pid})"
+    job = app.jobs.start("publish", label, work)
+    return {"job": job.to_dict(), "profile": pid}
+
+
+def _profile_content_secrets(handler, pid: str, **_):
+    app = handler.app
+    app.require_profile(pid)
+    body = handler._read_json()
+    raw = body.get("values")
+    if not isinstance(raw, dict):
+        raise ApiError("body must contain a 'values' object of platform -> credential")
+    config = app.profiles.load_config(pid)
+    return service.set_content_secrets(
+        config, values={str(key): str(value or "") for key, value in raw.items()}
+    )
+
+
+def _profile_platforms(handler, pid: str, **_):
+    """Registry + readiness for every syndication target. Read-only."""
+    from platforms import catalog
+    from publishers import check_all
+
+    app = handler.app
+    app.require_profile(pid)
+    config = app.profiles.load_config(pid)
+    return {
+        "platforms": catalog(),
+        "readiness": check_all(config, dry_run=True),
+        "enabled": config.platforms_enabled(),
+        "publishing_enabled": config.publishing_enabled,
+    }
+
+
 def _github_connect(handler, **_):
     body = handler._read_json()
     token = str(body.get("token") or "")
@@ -780,6 +971,20 @@ ROUTES: List[Tuple[str, Pattern[str], Callable[..., Any]]] = [
     ("POST", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/preview$"), _profile_preview),
     ("POST", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/send$"), _profile_send),
     ("POST", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/secrets$"), _profile_secrets),
+    # Content syndication. Paths carry the item id so the URL alone identifies
+    # the resource - and so a body never has to smuggle an id.
+    ("GET", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/platforms$"), _profile_platforms),
+    ("GET", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/content$"), _profile_content),
+    ("POST", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/content/draft$"), _profile_content_draft),
+    ("GET", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/content/items/(?P<item_id>[^/]+)$"), _profile_content_item),
+    ("PUT", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/content/items/(?P<item_id>[^/]+)$"), _profile_content_update),
+    ("POST", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/content/approve$"), _profile_content_approve),
+    ("POST", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/content/mark$"), _profile_content_mark),
+    ("POST", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/content/confirm$"), _profile_content_confirm),
+    ("POST", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/content/reset$"), _profile_content_reset),
+    ("POST", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/content/remove$"), _profile_content_remove),
+    ("POST", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/content/publish$"), _profile_content_publish),
+    ("POST", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/content/secrets$"), _profile_content_secrets),
     ("GET", re.compile(r"^/api/profiles/(?P<pid>[^/]+)/github$"), _github_status),
     ("POST", re.compile(r"^/api/github/connect$"), _github_connect),
     ("POST", re.compile(r"^/api/github/disconnect$"), _github_disconnect),

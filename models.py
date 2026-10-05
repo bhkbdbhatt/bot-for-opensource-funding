@@ -6,6 +6,7 @@ discovery, tracker, prompt engine and senders agree on shapes.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
@@ -32,6 +33,62 @@ STATUSES = PIPELINE_STATUSES + (STATUS_FAILED,)
 CHANNEL_EMAIL = "email"
 CHANNEL_FORUM = "forum"
 CHANNELS = (CHANNEL_EMAIL, CHANNEL_FORUM)
+
+# --------------------------------------------------------------------------- #
+# Content syndication pipeline
+#
+# The outreach pipeline above addresses one named human. The content pipeline
+# addresses a *platform*: an article is authored once and fanned out to every
+# platform it targets, so its unit of work is (article, platform), not sponsor.
+# --------------------------------------------------------------------------- #
+
+CONTENT_DRAFT = "draft"
+CONTENT_APPROVED = "approved"
+CONTENT_QUEUED = "queued"
+CONTENT_PUBLISHED = "published"
+CONTENT_FAILED = "failed"
+
+#: The content pipeline, in order. ``queued`` means "prepared for a human to
+#: submit on a platform that has no publishing API"; ``published`` always means
+#: a live URL is on record.
+CONTENT_PIPELINE_STATUSES = (
+    CONTENT_DRAFT,
+    CONTENT_APPROVED,
+    CONTENT_QUEUED,
+    CONTENT_PUBLISHED,
+)
+
+#: Every status the content store accepts. ``failed`` is bookkeeping for
+#: publisher errors and is not part of the pipeline.
+CONTENT_STATUSES = CONTENT_PIPELINE_STATUSES + (CONTENT_FAILED,)
+
+#: Publisher execution modes. Determined per platform, like `ForumSender.mode`.
+MODE_DRY_RUN = "dry-run"
+MODE_API = "api"
+MODE_MANUAL = "manual"
+MODE_WEBHOOK = "webhook"
+MODES = (MODE_DRY_RUN, MODE_API, MODE_MANUAL, MODE_WEBHOOK)
+
+#: Canonical ids of the syndication targets this build knows about. The richer
+#: capability record for each lives in `platforms.py`, which imports this tuple
+#: so there is exactly one list to keep in sync.
+PLATFORM_DEVTO = "devto"
+PLATFORM_HASHNODE = "hashnode"
+PLATFORM_MEDIUM = "medium"
+PLATFORM_WORDPRESS = "wordpress"
+PLATFORM_CODERLEGION = "coderlegion"
+PLATFORM_DEVDOJO = "devdojo"
+PLATFORM_WEBHOOK = "webhook"
+
+PLATFORM_IDS = (
+    PLATFORM_DEVTO,
+    PLATFORM_HASHNODE,
+    PLATFORM_MEDIUM,
+    PLATFORM_WORDPRESS,
+    PLATFORM_CODERLEGION,
+    PLATFORM_DEVDOJO,
+    PLATFORM_WEBHOOK,
+)
 
 OWNER_ORG = "Organization"
 OWNER_USER = "User"
@@ -106,6 +163,31 @@ def looks_like_noise_email(value: str) -> bool:
 
 def word_count(text: str) -> int:
     return len([token for token in re.split(r"\s+", (text or "").strip()) if token])
+
+
+_SLUG_STRIP_RE = re.compile(r"[^a-z0-9]+")
+_MAX_SLUG_LEN = 60
+
+
+def slugify(value: str, *, fallback: str = "post", limit: int = _MAX_SLUG_LEN) -> str:
+    """Lowercase, hyphenated, filesystem- and URL-safe identifier.
+
+    Used for content item ids, outbox filenames and post slugs. Deterministic:
+    the same title always yields the same slug, which is what lets the content
+    store detect an item it has already seen.
+    """
+    slug = _SLUG_STRIP_RE.sub("-", (value or "").strip().lower()).strip("-")
+    return slug[: max(int(limit), 1)].strip("-") or fallback
+
+
+def fingerprint(*parts: str) -> str:
+    """Stable short digest of the given parts.
+
+    Used to recognise "this exact article" across runs so a re-drafted post is
+    never silently published twice under a new id.
+    """
+    joined = "\x1f".join((part or "").strip().lower() for part in parts)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -353,4 +435,241 @@ class DiscoveredSponsor:
             f"{self.owner_name} ({self.owner_type}) | repos={self.repos_count} "
             f"genesys={self.genesys_repos_count} | stars={self.stars} "
             f"| {self.email_if_public or 'no public email'} | {self.top_repo}"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# ContentItem
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class Publication:
+    """The outcome of sending one article to one platform.
+
+    This is the syndication ledger: for every (article, platform) pair the bot
+    records whether it went out, in which mode, and - crucially - the live URL.
+    ``mode`` distinguishes a real API publish from a hand-off for manual
+    submission, so a human can tell at a glance what is actually public.
+    """
+
+    platform: str
+    mode: str = ""
+    status: str = "pending"      # pending | draft | manual | live | failed
+    url: str = ""
+    external_id: str = ""
+    detail: str = ""
+    attempts: int = 0
+    last_attempt_at: str = ""
+    queued_at: str = ""
+    published_at: str = ""
+    last_error: str = ""
+    updated_at: str = field(default_factory=now_iso)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, raw: Dict[str, Any]) -> "Publication":
+        if not isinstance(raw, dict):
+            raise ValueError("publication entry must be a mapping")
+        known = {f.name for f in fields(cls)}
+        data = {key: value for key, value in raw.items() if key in known}
+        data["platform"] = _as_str(data.get("platform"))
+        data["mode"] = _as_str(data.get("mode"))
+        data["status"] = _as_str(data.get("status"), "pending")
+        data["url"] = _as_str(data.get("url"))
+        data["external_id"] = _as_str(data.get("external_id"))
+        data["detail"] = _as_str(data.get("detail"))
+        data["last_error"] = _as_str(data.get("last_error"))
+        data["attempts"] = _as_int(data.get("attempts"))
+        for stamp in ("last_attempt_at", "queued_at", "published_at"):
+            data[stamp] = _as_str(data.get(stamp))
+        data["updated_at"] = _as_str(data.get("updated_at")) or now_iso()
+        return cls(**data)
+
+    @property
+    def is_live(self) -> bool:
+        return self.status == "live" and bool(self.url)
+
+    @property
+    def last_activity_at(self) -> str:
+        """Most recent moment anything happened to this (article, platform) pair.
+
+        Used as the cooldown anchor. It deliberately includes *failed* attempts:
+        a target that returned 401 or 429 has told us it is not ready, and the
+        right response is to leave it alone for a while rather than to try again
+        on the next tick.
+        """
+        return self.last_attempt_at or self.published_at or self.queued_at
+
+    def summary_line(self) -> str:
+        return f"{self.platform} | {self.mode or '-'} | {self.status} | {self.url or '-'}"
+
+
+@dataclass
+class ContentItem:
+    """One article, authored once and targeted at many platforms.
+
+    An item owns its ``body_markdown`` and the list of platforms it should
+    appear on. The per-platform outcomes live in ``publications``, so the item's
+    overall ``status`` is derived: everything live means ``published``, nothing
+    live but something hand-ed out means ``queued``, and a human approving it is
+    what moves it out of ``draft``.
+    """
+
+    id: str
+    title: str
+    body_markdown: str = ""
+    summary: str = ""
+    topic: str = ""
+    platforms: List[str] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+    canonical_url: str = ""
+    status: str = CONTENT_DRAFT
+    source: str = "manual"      # manual | composed | imported
+    notes: str = ""
+    words: int = 0
+    fingerprint: str = ""
+    attempts: int = 0
+    last_error: str = ""
+    created_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
+    approved_at: str = ""
+    last_published_at: str = ""
+    publications: Dict[str, Publication] = field(default_factory=dict)
+
+    # -- serialization ----------------------------------------------------- #
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["publications"] = {
+            key: value.to_dict() for key, value in self.publications.items()
+        }
+        return data
+
+    @classmethod
+    def from_dict(cls, raw: Dict[str, Any]) -> "ContentItem":
+        if not isinstance(raw, dict):
+            raise ValueError("content entry must be a mapping")
+        known = {f.name for f in fields(cls)}
+        data = {key: value for key, value in raw.items() if key in known}
+        data["id"] = _as_str(data.get("id"))
+        data["title"] = _as_str(data.get("title"))
+        data["body_markdown"] = str(data.get("body_markdown") or "")
+        data["summary"] = _as_str(data.get("summary"))
+        data["topic"] = _as_str(data.get("topic"))
+        data["tags"] = _as_str_list(data.get("tags"))
+        data["platforms"] = [item.lower() for item in _as_str_list(data.get("platforms"))]
+        data["canonical_url"] = _as_str(data.get("canonical_url"))
+        data["status"] = _as_str(data.get("status"), CONTENT_DRAFT).lower()
+        data["source"] = _as_str(data.get("source"), "manual")
+        data["notes"] = _as_str(data.get("notes"))
+        data["last_error"] = _as_str(data.get("last_error"))
+        data["fingerprint"] = _as_str(data.get("fingerprint"))
+        data["words"] = _as_int(data.get("words"))
+        data["attempts"] = _as_int(data.get("attempts"))
+        for stamp in ("created_at", "updated_at", "approved_at", "last_published_at"):
+            data[stamp] = _as_str(data.get(stamp))
+        publications: Dict[str, Publication] = {}
+        raw_publications = data.get("publications")
+        if isinstance(raw_publications, dict):
+            for key, value in raw_publications.items():
+                try:
+                    publication = Publication.from_dict({**(value or {}), "platform": key})
+                except (ValueError, TypeError):
+                    continue
+                publications[publication.platform] = publication
+        data["publications"] = publications
+        item = cls(**data)
+        item.sync_status()
+        return item
+
+    # -- validation -------------------------------------------------------- #
+
+    def validate(self) -> List[str]:
+        """Return a list of human readable problems (empty list == valid)."""
+        errors: List[str] = []
+        if not self.title:
+            errors.append("title is required")
+        if len(self.title) > 200:
+            errors.append("title must be 200 characters or fewer")
+        if not self.body_markdown.strip():
+            errors.append("body_markdown is required")
+        if self.status not in CONTENT_STATUSES:
+            errors.append(
+                f"status must be one of {', '.join(CONTENT_STATUSES)} (got {self.status!r})"
+            )
+        if not self.platforms:
+            errors.append("at least one target platform is required")
+        for platform in self.platforms:
+            if platform not in PLATFORM_IDS:
+                errors.append(
+                    f"unknown platform {platform!r}; expected one of {', '.join(PLATFORM_IDS)}"
+                )
+        if self.canonical_url and not is_valid_url(self.canonical_url):
+            errors.append("canonical_url must be an http(s) URL")
+        return errors
+
+    # -- behaviour --------------------------------------------------------- #
+
+    @property
+    def key(self) -> str:
+        return normalize_name(self.id)
+
+    def publication(self, platform: str) -> Publication:
+        key = (platform or "").strip().lower()
+        existing = self.publications.get(key)
+        if existing is None:
+            existing = Publication(platform=key)
+            self.publications[key] = existing
+        return existing
+
+    def live_urls(self) -> List[str]:
+        return [entry.url for entry in self.publications.values() if entry.is_live]
+
+    def pending_platforms(self) -> List[str]:
+        """Targets still awaiting a live publish, in the item's own order."""
+        return [
+            platform
+            for platform in self.platforms
+            if not (self.publications.get(platform) is not None
+                    and self.publications[platform].is_live)
+        ]
+
+    def compute_fingerprint(self) -> str:
+        """Digest of the content itself, so a re-draft is recognisable."""
+        return fingerprint(self.title, self.body_markdown)
+
+    def sync_status(self) -> str:
+        """Derive ``status`` from the publication ledger and return it.
+
+        * every target live -> ``published``
+        * anything hand-ed out for a human -> ``queued``
+        * otherwise unchanged, unless it is a stale ``published`` (a target was
+          un-confirmed, so it goes back to ``approved`` and can be re-sent)
+
+        ``draft``, ``approved`` and ``failed`` are operator intent, so the ledger
+        never overwrites them from below.
+        """
+        targets = list(self.platforms)
+        if not targets:
+            return self.status
+        entries = [self.publications.get(platform) for platform in targets]
+        live = [entry for entry in entries if entry is not None and entry.is_live]
+        manual = [entry for entry in entries if entry is not None and entry.status == "manual"]
+        if live and len(live) == len(targets):
+            self.status = CONTENT_PUBLISHED
+        elif manual:
+            self.status = CONTENT_QUEUED
+        elif self.status == CONTENT_PUBLISHED:
+            self.status = CONTENT_APPROVED
+        elif self.status not in {CONTENT_APPROVED, CONTENT_FAILED}:
+            self.status = CONTENT_DRAFT
+        return self.status
+
+    def summary_line(self) -> str:
+        return (
+            f"{self.title[:60]} | {self.status} | targets={','.join(self.platforms) or '-'} "
+            f"| live={len(self.live_urls())}"
         )

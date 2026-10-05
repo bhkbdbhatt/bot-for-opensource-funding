@@ -284,3 +284,41 @@ button.wide { width: 100%; justify-content: center; }
 .list li { padding: 8px 0; border-bottom: 1px solid var(--border); }
 .list li:last-child { border-bottom: none; }
 code { font-family: var(--mono); background: var(--bg-alt); padding: 1px 5px; border-radius: 5px; font-size: 12px; }
+
+/* ---------------------------------------------------------------- content step */
+
+/* Platform ids are longer than the outreach channel names, so the usage label
+   needs room; 60px truncated "hashnode" into an unreadable stub. */
+.usage-item .name { width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+.tabs .tab {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  padding: 6px 12px;
+}
+.tabs .tab:hover { color: var(--text); background: var(--bg-alt); }
+.tabs .tab.active { color: var(--text); border-color: var(--border); background: var(--bg-alt); font-weight: 600; }
+
+.platform-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 10px;
+  padding: 12px 14px;
+}
+.platform-row.on { border-color: rgba(56,189,248,.45); background: rgba(56,189,248,.04); }
+.platform-body { border-top: 1px dashed var(--border); margin-top: 10px; padding-top: 10px; }
+.platform-body .field { margin-bottom: 8px; }
+.platform-body .check { margin-bottom: 6px; }
+
+.hint.warn { color: var(--warn); }
+.nowrap { white-space: nowrap; }
+
+button.link-btn.small { padding: 0 4px; font-size: 12px; }
+
+/* Long article bodies read better with room to breathe. */
+pre.message-preview { max-height: 60vh; }
